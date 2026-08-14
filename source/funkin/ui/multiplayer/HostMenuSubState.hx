@@ -6,6 +6,8 @@ import flixel.ui.FlxButton;
 import funkin.graphics.FunkinSprite;
 import funkin.ui.MusicBeatSubState;
 import funkin.multiplayer.MultiplayerServer;
+import funkin.multiplayer.MultiplayerInviteService;
+import funkin.multiplayer.MultiplayerAccountManager;
 import funkin.play.PlayState;
 import funkin.play.song.Song;
 import funkin.data.song.SongRegistry;
@@ -44,6 +46,10 @@ class HostMenuSubState extends MusicBeatSubState
   var server:Null<MultiplayerServer> = null;
   var serverId:String = '';
   var port:Int = 2082;
+
+  // guardadas pra dar unregister certinho no MultiplayerInviteService quando o card fechar
+  var onInviteAcceptedHandler:Null<String->Void> = null;
+  var onInviteDeclinedHandler:Null<String->Void> = null;
 
   // Só fica true quando o segundo jogador conecta.
   var playerReady:Bool = false;
@@ -114,7 +120,55 @@ class HostMenuSubState extends MusicBeatSubState
     closeButton.color = 0xFF8B8B8B;
     add(closeButton);
 
+    connectToInviteService();
     startHosting();
+  }
+
+  /**
+   * Garante que o MultiplayerInviteService tá conectado no relay e
+   * registrado com o Discord dessa conta (se tiver vinculado), e escuta
+   * quando o convite que a gente mandar for aceito/recusado — é o gatilho
+   * pra trocar o server de LAN pra relay.
+   */
+  function connectToInviteService():Void
+  {
+    var invites = MultiplayerInviteService.instance;
+
+    // idempotente: se a OnlineMenuState já chamou isso, não faz nada de novo.
+    invites.connect();
+
+    if (MultiplayerAccountManager.isDiscordLinked(account))
+    {
+      invites.setIdentity(Std.string(Reflect.field(account, 'discordId')), Std.string(Reflect.field(account, 'discordUsername')),
+        Std.string(Reflect.field(account, 'discordAvatarUrl')));
+    }
+
+    invites.onInviteAccepted = onInviteAcceptedHandler = (sessionId:String) ->
+    {
+      if (sessionId != serverId) return; // convite de outra sessão, ignora
+
+      if (playerReady)
+      {
+        trace('[Host] convite aceito mas já tem alguém conectado (LAN), ignorando.');
+        return;
+      }
+
+      trace('[Host] convidado aceitou pelo Discord, trocando o server pro modo relay.');
+
+      if (server != null)
+      {
+        // troca o transporte sem perder onClientConnect/onClientMessage/onClientDisconnect,
+        // que continuam plugados na mesma instância.
+        server.stop();
+        server.startRelay(serverId);
+      }
+    };
+
+    invites.onInviteDeclined = onInviteDeclinedHandler = (sessionId:String) ->
+    {
+      if (sessionId != serverId) return;
+      trace('[Host] convite recusado.');
+    };
   }
 
   function generateServerId():String
@@ -263,8 +317,17 @@ class HostMenuSubState extends MusicBeatSubState
     {
       server.stop();
     }
+    unregisterFromInviteService();
     if (onClosed != null) onClosed(success);
     close();
+  }
+
+  /** Tira os callbacks daqui do MultiplayerInviteService pra não disparar num card já fechado. */
+  function unregisterFromInviteService():Void
+  {
+    var invites = MultiplayerInviteService.instance;
+    if (invites.onInviteAccepted == onInviteAcceptedHandler) invites.onInviteAccepted = null;
+    if (invites.onInviteDeclined == onInviteDeclinedHandler) invites.onInviteDeclined = null;
   }
 
   override function update(elapsed:Float):Void
@@ -280,6 +343,7 @@ class HostMenuSubState extends MusicBeatSubState
   override function destroy():Void
   {
     if (server != null) server.stop();
+    unregisterFromInviteService();
     super.destroy();
   }
 }

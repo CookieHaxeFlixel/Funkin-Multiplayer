@@ -9,6 +9,11 @@ import funkin.ui.MusicBeatSubState;
 import funkin.multiplayer.RemoteImageLoader;
 import funkin.multiplayer.MultiplayerInviteService;
 import funkin.multiplayer.MultiplayerInviteService.InviteInfo;
+import funkin.multiplayer.MultiplayerClient;
+import funkin.play.PlayState;
+import funkin.play.song.Song;
+import funkin.data.song.SongRegistry;
+import funkin.ui.transition.LoadingState;
 
 /**
  * Card que aparece no PC do CONVIDADO quando alguém manda um convite.
@@ -29,6 +34,10 @@ class InviteNotificationSubState extends MusicBeatSubState
   var nickText:Null<FlxText> = null;
   var acceptButton:Null<FlxButton> = null;
   var discardButton:Null<FlxButton> = null;
+  var cancelButton:Null<FlxButton> = null;
+
+  var client:Null<MultiplayerClient> = null;
+  var accepted:Bool = false;
 
   public function new(invite:InviteInfo)
   {
@@ -84,28 +93,127 @@ class InviteNotificationSubState extends MusicBeatSubState
 
   function onAcceptPressed():Void
   {
+    if (accepted) return; // já clicou, evita clique duplo
+    accepted = true;
+
     MultiplayerInviteService.instance.respondToInvite(invite, true);
 
-    // TODO: aqui é a parte que ainda não existe de verdade — conectar no
-    // server do host (invite.serverId / invite.port) igual o
-    // connectOnline() da OnlineMenuState faz manualmente hoje, só que
-    // automático a partir do convite recebido. Provavelmente:
-    //
-    //   var c = new MultiplayerClient(enderecoDoHost, invite.port);
-    //   c.onConnect = () -> ...
-    //   #if MULTIPLAYER_FEATURE
-    //   PlayState.multiplayerClient = c;
-    //   PlayState.multiplayerMatchActive = true;
-    //   #end
-    //   c.connect();
-    //
-    // O "enderecoDoHost" é o problema: hoje connectOnline() usa
-    // '127.0.0.1' fixo (só funciona porque host e guest tão na mesma
-    // máquina/rede local nos testes). Convite via Discord implica gente
-    // em redes diferentes — vai precisar de NAT traversal ou de o relay
-    // devolver um endereço público/túnel junto do convite.
+    var sessionId:Null<String> = invite.inviteId;
+    if (sessionId == null)
+    {
+      trace('[Invite] convite sem sessionId (inviteId), não dá pra conectar.');
+      close();
+      return;
+    }
+    final relaySessionId:String = sessionId; // narrow pra String de verdade, pra usar dentro das closures abaixo
+
+    // troca os botões por um estado de "conectando", com um jeito de desistir
+    showWaitingState();
+
+    client = new MultiplayerClient();
+
+    client.onConnect = () ->
+    {
+      trace('[Invite] conectado ao host pelo relay, aguardando o host escolher a música.');
+      if (nickText != null) nickText.text = 'Conectado! Aguardando o host começar...';
+    };
+
+    client.onDisconnect = () ->
+    {
+      trace('[Invite] desconectado do host antes da partida começar.');
+      if (nickText != null) nickText.text = 'O host saiu antes de começar.';
+    };
+
+    client.onMessage = (data:Dynamic) ->
+    {
+      if (data == null || !Reflect.hasField(data, 'type')) return;
+      if (Std.string(Reflect.field(data, 'type')) != 'match_start') return;
+
+      startMatch(relaySessionId, data);
+    };
+
+    #if MULTIPLAYER_FEATURE
+    PlayState.multiplayerClient = client;
+    PlayState.multiplayerMatchActive = true;
+    PlayState.multiplayerMatchId = relaySessionId;
+    #end
+
+    client.connectRelay(relaySessionId);
+  }
+
+  /** Substitui ACCEPT/DISCARD por uma mensagem de espera + botão de cancelar. */
+  function showWaitingState():Void
+  {
+    if (nickText != null) nickText.text = 'Conectando com ' + invite.username + '...';
+
+    if (acceptButton != null)
+    {
+      remove(acceptButton);
+      acceptButton = null;
+    }
+    if (discardButton != null)
+    {
+      remove(discardButton);
+      discardButton = null;
+    }
+
+    final cardW:Int = 360;
+    final cardH:Int = 260;
+    final cardX:Float = (FlxG.width - cardW) / 2;
+    final cardY:Float = (FlxG.height - cardH) / 2;
+
+    cancelButton = new FlxButton(cardX + (cardW - 140) / 2, cardY + cardH - 70, 'CANCELAR', onCancelWaitingPressed);
+    cancelButton.color = 0xFFE74C3C;
+    cancelButton.label.color = 0xFFFFFFFF;
+    cancelButton.scale.set(1.1, 1.1);
+    cancelButton.updateHitbox();
+    add(cancelButton);
+  }
+
+  function onCancelWaitingPressed():Void
+  {
+    if (client != null)
+    {
+      client.disconnect();
+      client = null;
+    }
+
+    #if MULTIPLAYER_FEATURE
+    if (PlayState.multiplayerMatchId == invite.inviteId)
+    {
+      PlayState.multiplayerClient = null;
+      PlayState.multiplayerMatchActive = false;
+      PlayState.multiplayerMatchId = null;
+    }
+    #end
 
     close();
+  }
+
+  function startMatch(sessionId:String, data:Dynamic):Void
+  {
+    var songId:String = Std.string(Reflect.field(data, 'songId'));
+    var difficulty:String = Reflect.hasField(data, 'difficulty') ? Std.string(Reflect.field(data, 'difficulty')) : 'normal';
+    var variation:String = Reflect.hasField(data, 'variation') ? Std.string(Reflect.field(data, 'variation')) : 'default';
+
+    var song:Null<Song> = SongRegistry.instance.fetchEntry(songId);
+    if (song == null)
+    {
+      trace('[Invite] host mandou match_start com música desconhecida: ' + songId);
+      if (nickText != null) nickText.text = 'Erro: música não encontrada (' + songId + ').';
+      return;
+    }
+
+    trace('[Invite] match_start recebido, indo pro PlayState em modo multiplayer.');
+
+    close();
+
+    LoadingState.loadPlayState({
+      targetSong: song,
+      targetDifficulty: difficulty,
+      targetVariation: variation,
+      isMultiplayerMode: true
+    });
   }
 
   function onDiscardPressed():Void
@@ -117,6 +225,27 @@ class InviteNotificationSubState extends MusicBeatSubState
   override function update(elapsed:Float):Void
   {
     super.update(elapsed);
-    if (FlxG.keys.justPressed.ESCAPE) onDiscardPressed();
+    if (FlxG.keys.justPressed.ESCAPE)
+    {
+      if (accepted)
+      {
+        onCancelWaitingPressed();
+      }
+      else
+      {
+        onDiscardPressed();
+      }
+    }
+  }
+
+  override function destroy():Void
+  {
+    // se o card for destruído sem passar por close() normal (ex: troca de tela abrupta),
+    // não deixa o client pendurado tentando falar com um relay que ninguém mais escuta.
+    if (client != null && !accepted)
+    {
+      client.disconnect();
+    }
+    super.destroy();
   }
 }

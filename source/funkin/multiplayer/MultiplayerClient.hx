@@ -26,6 +26,10 @@ class MultiplayerClient
   var running:Bool = false;
   var readThread:Null<Thread> = null;
 
+  // --- modo relay (host e convidado em redes diferentes) ---
+  public var relayMode(default, null):Bool = false;
+  public var relaySessionId(default, null):Null<String> = null;
+
   public function new(host:String = "127.0.0.1", port:Int = 8082)
   {
     this.host = host;
@@ -35,7 +39,7 @@ class MultiplayerClient
 
   function get_connected():Bool
   {
-    return socket != null && running;
+    return relayMode ? running : (socket != null && running);
   }
 
   public function connect(?targetHost:String, ?targetPort:Int):Void
@@ -56,9 +60,40 @@ class MultiplayerClient
     if (onConnect != null) onConnect();
   }
 
+  /**
+   * Entra como convidado numa sessão do relay em vez de abrir socket
+   * direto pro host. Use quando você aceitou um convite (sessionId =
+   * invite.inviteId) — o resto (onMessage, connected, send) funciona
+   * igual ao modo LAN, então PlayState não precisa saber a diferença.
+   */
+  public function connectRelay(sessionId:String):Void
+  {
+    disconnect();
+
+    relayMode = true;
+    relaySessionId = sessionId;
+    running = true;
+
+    RelayClient.instance.joinRelaySession(sessionId, (payload) ->
+    {
+      if (onMessage != null) onMessage(payload);
+    }, () ->
+    {
+      if (onConnect != null) onConnect();
+    });
+  }
+
   public function disconnect():Void
   {
     running = false;
+
+    if (relayMode && relaySessionId != null)
+    {
+      RelayClient.instance.leaveRelaySession(relaySessionId);
+    }
+    relayMode = false;
+    relaySessionId = null;
+
     if (readThread != null)
     {
       readThread = null;
@@ -79,8 +114,15 @@ class MultiplayerClient
 
   public function send(data:Dynamic):Void
   {
-    if (!connected || socket == null) return;
+    if (!connected) return;
 
+    if (relayMode)
+    {
+      if (relaySessionId != null) RelayClient.instance.sendRelayData(relaySessionId, data);
+      return;
+    }
+
+    if (socket == null) return;
     var payload:String = Json.stringify(data);
     var frame:Bytes = buildFrame(payload);
     socket.output.writeBytes(frame, 0, frame.length);
@@ -276,11 +318,18 @@ class MultiplayerClient
 {
   public static var instance:Null<MultiplayerClient> = null;
 
+  public var relayMode(default, null):Bool = false;
+  public var relaySessionId(default, null):Null<String> = null;
+
   public function new(host:String = "127.0.0.1", port:Int = 3000)
   {
   }
 
   public function connect(?targetHost:String, ?targetPort:Int):Void
+  {
+  }
+
+  public function connectRelay(sessionId:String):Void
   {
   }
 

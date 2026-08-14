@@ -3,48 +3,128 @@ package funkin.multiplayer;
 /**
  * Client de busca/convite por nick do Discord.
  *
- * ATENÇÃO: isso aqui é um STUB. Não fala com nenhum servidor de verdade
- * ainda. Pra convidar alguém que não tá na sua rede local, precisa de um
- * serviço de matchmaking/relay — um servidor central que sabe quem tá
- * online e consegue entregar o convite pro PC certo. Nenhum arquivo que
- * vocês têm hoje (MultiplayerServer/MultiplayerClient são só pra 1x1
- * direto, sem descoberta de usuário) implementa isso.
+ * Backend real: fala com o RelayServer (source/funkin/multiplayer/relay/RelayServer.hx)
+ * através do RelayClient (source/funkin/multiplayer/RelayClient.hx). Isso resolve
+ * o caso de convite entre PCs em redes diferentes, porque o relay é quem
+ * sabe "quem tá online" e entrega a mensagem pro socket certo, sem
+ * depender do host abrir porta na própria rede.
  *
- * A interface pública (métodos + typedef abaixo) foi desenhada pra não
- * precisar mudar nada na UI (InviteSearchSubState / InviteResultRow /
- * InviteNotificationSubState / HostMenuSubState) quando o backend real
- * existir — só troca o miolo de cada função marcada com TODO.
+ * A interface pública (métodos + typedef abaixo) é a mesma de quando isso
+ * era stub — nenhuma tela (InviteSearchSubState / InviteResultRow /
+ * InviteNotificationSubState / HostMenuSubState) precisa mudar.
  */
 class MultiplayerInviteService
 {
   public static var instance(default, null):MultiplayerInviteService = new MultiplayerInviteService();
 
+  /** Endereço do relay central. Troque aqui se o relay morar em outro host/porta. */
+  public static var RELAY_HOST:String = "127.0.0.1";
+  public static var RELAY_PORT:Int = 8090;
+
   /** Chamado quando ALGUÉM te manda um convite (você é o convidado). */
   public var onInviteReceived:Null<InviteInfo->Void>;
 
+  /**
+   * Chamado do lado de quem CONVIDOU quando o destinatário aceita/recusa.
+   * `sessionId` é o mesmo valor passado como `hostServerId` em sendInvite
+   * (então dá pra comparar direto com o serverId que você já tem, tipo
+   * no HostMenuSubState). Use isso pra saber a hora de trocar o
+   * MultiplayerServer pro modo relay (server.startRelay(sessionId)).
+   */
+  public var onInviteAccepted:Null<String->Void>;
+  public var onInviteDeclined:Null<String->Void>;
+
   var connected:Bool = false;
+  var myDiscordId:Null<String> = null;
+  var pendingIdentity:Null<{discordId:String, username:String, avatarUrl:String}> = null;
 
   function new()
   {
   }
 
   /**
-   * TODO: conectar de verdade no relay/matchmaking (provavelmente um
-   * WebSocket pra um server central, autenticado com o discordId que
-   * já vem do LoginSubState/DiscordAuthServer). Chame isso uma vez,
-   * por exemplo no create() da OnlineMenuState.
+   * Conecta de verdade no relay. Mesma assinatura de antes (sem
+   * argumentos) pra não quebrar quem já chama isso hoje (ex: create() da
+   * OnlineMenuState). Chame isso uma vez.
+   *
+   * Sozinho isso só abre a conexão — pra aparecer nas buscas e receber
+   * convite de alguém, também é preciso chamar setIdentity(...) com o
+   * discordId/username/avatarUrl (pode ser antes ou depois de connect();
+   * se chamado antes, o registro é enviado assim que a conexão abrir).
    */
   public function connect():Void
   {
     if (connected) return;
-    connected = true;
-    trace('[Invite] STUB: fingindo estar conectado ao relay de convites. Troque por uma conexão real quando o backend existir.');
+
+    var relay = RelayClient.instance;
+
+    relay.onError = (msg) -> trace('[Invite] erro no relay: $msg');
+
+    relay.onInviteReceived = (sessionId, fromDiscordId, fromUsername, fromAvatarUrl, hostServerId, hostPort) ->
+    {
+      if (onInviteReceived == null) return;
+      onInviteReceived({
+        discordId: fromDiscordId,
+        username: fromUsername,
+        avatarUrl: fromAvatarUrl,
+        inviteId: sessionId,
+        serverId: hostServerId,
+        port: hostPort
+      });
+    };
+
+    relay.onInviteResponse = (sessionId, accept) ->
+    {
+      if (accept)
+      {
+        if (onInviteAccepted != null) onInviteAccepted(sessionId);
+      }
+      else
+      {
+        if (onInviteDeclined != null) onInviteDeclined(sessionId);
+      }
+    };
+
+    try
+    {
+      relay.connect(RELAY_HOST, RELAY_PORT);
+      connected = true;
+
+      if (pendingIdentity != null)
+      {
+        relay.register(pendingIdentity.discordId, pendingIdentity.username, pendingIdentity.avatarUrl);
+        myDiscordId = pendingIdentity.discordId;
+      }
+    }
+    catch (e:Dynamic)
+    {
+      trace('[Invite] não deu pra conectar no relay ($RELAY_HOST:$RELAY_PORT): $e');
+      connected = false;
+    }
+  }
+
+  /**
+   * Registra quem você é no relay (pra outros conseguirem te buscar/
+   * convidar). Chame depois que o discordId/username/avatarUrl da conta
+   * estiverem resolvidos (ex: depois do linkDiscordAccount no LoginSubState,
+   * ou no create() da OnlineMenuState lendo a conta já vinculada).
+   */
+  public function setIdentity(discordId:String, username:String, avatarUrl:String):Void
+  {
+    myDiscordId = discordId;
+
+    if (!connected)
+    {
+      pendingIdentity = {discordId: discordId, username: username, avatarUrl: avatarUrl};
+      return;
+    }
+
+    RelayClient.instance.register(discordId, username, avatarUrl);
   }
 
   /**
    * Busca usuários do Discord por nick (prefixo/substring). Assíncrono
-   * de propósito (callback, não return) porque uma busca de verdade
-   * vai bater num servidor.
+   * porque bate no relay de verdade.
    */
   public function searchByNick(query:String, callback:Array<InviteInfo>->Void):Void
   {
@@ -54,18 +134,30 @@ class MultiplayerInviteService
       return;
     }
 
-    trace('[Invite] STUB: buscando "$query" — sem backend ainda, devolvendo lista vazia.');
-    // TODO: substituir por algo como:
-    //   relayClient.send({ type: 'search_user', query: query });
-    //   relayClient.onMessage = (data) -> if (data.type == 'search_result') callback(parseResults(data));
-    callback([]);
+    if (!connected)
+    {
+      trace('[Invite] searchByNick chamado sem estar conectado ao relay.');
+      callback([]);
+      return;
+    }
+
+    RelayClient.instance.searchByNick(query, (results) ->
+    {
+      var parsed:Array<InviteInfo> = results.map((r) -> ({
+        discordId: Std.string(Reflect.field(r, 'discordId')),
+        username: Std.string(Reflect.field(r, 'username')),
+        avatarUrl: Std.string(Reflect.field(r, 'avatarUrl'))
+      } : InviteInfo));
+      callback(parsed);
+    });
   }
 
   /**
    * Manda um convite pro usuário `target`, apontando pro server que o
-   * host já subiu (endereço/porta do MultiplayerServer local dele — ou
-   * um ID que o relay resolve pro endereço real, se o convidado não
-   * tiver como alcançar o IP local do host direto).
+   * host já subiu. `hostServerId` é usado como o sessionId do relay
+   * também — é por isso que ele tem que ser o mesmo id que o host mostra
+   * na tela (ver HostMenuSubState.serverId) e depois passa pra
+   * server.startRelay(serverId) quando o convite for aceito.
    */
   public function sendInvite(target:InviteInfo, hostServerId:String, hostPort:Int, ?onSent:Void->Void, ?onError:String->Void):Void
   {
@@ -75,24 +167,45 @@ class MultiplayerInviteService
       return;
     }
 
-    trace('[Invite] STUB: mandando convite pra ${target.username} (server=$hostServerId, porta=$hostPort). Sem backend ainda.');
-    // TODO: relayClient.send({ type: 'invite', targetDiscordId: target.discordId, serverId: hostServerId, port: hostPort });
+    if (!connected)
+    {
+      if (onError != null) onError('sem conexão com o relay');
+      return;
+    }
+
+    var sessionId:String = hostServerId;
+
+    RelayClient.instance.onInviteError = (sid, reason) ->
+    {
+      if (sid != sessionId) return;
+      if (onError != null) onError(reason);
+    };
+
+    RelayClient.instance.sendInvite(target.discordId, sessionId, hostServerId, hostPort);
+
     if (onSent != null) onSent();
   }
 
-  /** Chame do lado do convidado quando ele apertar ACCEPT/DISCARD. */
+  /**
+   * Chame do lado do convidado quando ele apertar ACCEPT/DISCARD.
+   * `invite.inviteId` é o sessionId que o relay usa pra parear host e
+   * convidado quando o modo relay entrar em jogo (ver MultiplayerServer.startRelay /
+   * MultiplayerClient.connectRelay).
+   */
   public function respondToInvite(invite:InviteInfo, accept:Bool):Void
   {
-    trace('[Invite] STUB: resposta ao convite de ${invite.username}: ' + (accept ? 'ACCEPT' : 'DISCARD') + '. Sem backend ainda.');
-    // TODO: relayClient.send({ type: 'invite_response', inviteId: invite.inviteId, accept: accept });
+    if (!connected)
+    {
+      trace('[Invite] respondToInvite chamado sem estar conectado ao relay.');
+      return;
+    }
+
+    RelayClient.instance.respondToInvite(invite.inviteId, accept);
   }
 
   /**
    * Só pra testar a UI sem precisar do relay: dispara onInviteReceived
-   * manualmente, simulando que alguém te convidou. Chame isso do
-   * console/debug enquanto o backend real não existe, ex:
-   *   MultiplayerInviteService.instance.debugSimulateIncomingInvite(
-   *     'amigo123', 'https://cdn.discordapp.com/embed/avatars/0.png', 'ABC123', 2082);
+   * manualmente, simulando que alguém te convidou.
    */
   public function debugSimulateIncomingInvite(fromUsername:String, fromAvatarUrl:String, serverId:String, port:Int):Void
   {

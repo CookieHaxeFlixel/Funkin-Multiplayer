@@ -24,6 +24,10 @@ class MultiplayerServer
   var client:Null<Socket>;
   var acceptThread:Null<Thread> = null;
 
+  // --- modo relay (host e convidado em redes diferentes) ---
+  public var relayMode(default, null):Bool = false;
+  public var relaySessionId(default, null):Null<String> = null;
+
   public function new(port:Int = 3000)
   {
     this.port = port;
@@ -43,9 +47,42 @@ class MultiplayerServer
     acceptThread = Thread.create(runAcceptLoop);
   }
 
+  /**
+   * Sobe como host sem abrir socket LAN nenhum — em vez disso, entra
+   * numa sessão do RelayClient e passa a mandar/receber por ela. Use
+   * isso quando o convidado aceitar um convite que veio pelo relay
+   * (sessionId = invite.inviteId). O resto do código (broadcast,
+   * onClientMessage, onClientConnect/Disconnect) funciona igual, o
+   * PlayState nem percebe a diferença.
+   */
+  public function startRelay(sessionId:String):Void
+  {
+    if (running) return;
+
+    relayMode = true;
+    relaySessionId = sessionId;
+    running = true;
+
+    RelayClient.instance.joinRelaySession(sessionId, (payload) ->
+    {
+      if (onClientMessage != null) onClientMessage(payload);
+    }, () ->
+    {
+      // convidado entrou na sessão do relay = mesmo evento que "client conectou" no modo LAN
+      if (onClientConnect != null) onClientConnect();
+    });
+  }
+
   public function stop():Void
   {
     running = false;
+
+    if (relayMode && relaySessionId != null)
+    {
+      RelayClient.instance.leaveRelaySession(relaySessionId);
+    }
+    relayMode = false;
+    relaySessionId = null;
 
     if (client != null)
     {
@@ -70,6 +107,12 @@ class MultiplayerServer
 
   public function broadcast(data:Dynamic):Void
   {
+    if (relayMode)
+    {
+      if (relaySessionId != null) RelayClient.instance.sendRelayData(relaySessionId, data);
+      return;
+    }
+
     if (client == null) return;
     try
     {
@@ -269,12 +312,19 @@ class MultiplayerServer
   public var onClientConnect:Null<() -> Void>;
   public var onClientDisconnect:Null<() -> Void>;
 
+  public var relayMode(default, null):Bool = false;
+  public var relaySessionId(default, null):Null<String> = null;
+
   public function new(port:Int = 3000)
   {
     this.port = port;
   }
 
   public function start():Void
+  {
+  }
+
+  public function startRelay(sessionId:String):Void
   {
   }
 
