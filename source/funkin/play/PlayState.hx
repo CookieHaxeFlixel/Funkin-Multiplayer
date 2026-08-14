@@ -85,6 +85,10 @@ import funkin.api.discord.DiscordClient;
 import funkin.api.newgrounds.Medals;
 import funkin.api.newgrounds.Leaderboards;
 #end
+#if MULTIPLAYER_FEATURE
+import funkin.multiplayer.MultiplayerClient;
+import funkin.multiplayer.MultiplayerServer;
+#end
 
 /**
  * Parameters used to initialize the PlayState.
@@ -122,6 +126,11 @@ typedef PlayStateParams =
    * @default `false`
    */
   ?botPlayMode:Bool,
+  /**
+   * Whether the song should start in Multiplayer Mode.
+   * @default `false`
+   */
+  ?isMultiplayerMode:Bool,
   /**
    * Whether the results screen should show up before returning to the chart editor.
    * @default `false`
@@ -176,6 +185,12 @@ class PlayState extends MusicBeatSubState
    * There should be only one PlayState in existence at a time, we can use a singleton.
    */
   public static var instance:Null<PlayState>;
+
+  #if MULTIPLAYER_FEATURE
+  public static var multiplayerClient:Null<MultiplayerClient> = null;
+  public static var multiplayerMatchActive:Bool = false;
+  public static var multiplayerMatchId:Null<String> = null;
+  #end
 
   /**
    * This sucks. We need this because FlxG.resetState(); assumes the constructor has no arguments.
@@ -391,6 +406,12 @@ class PlayState extends MusicBeatSubState
    * If true, player will not gain or lose score from notes.
    */
   public var isBotPlayMode:Bool = false;
+
+  /**
+   * Whether the game is currently in Multiplayer Mode.
+   * If true, no bot will be used and multiplayer mechanics are enabled.
+   */
+  public var isMultiplayerMode:Bool = false;
 
   /**
    * Whether the results screen should show up before returning to the chart editor.
@@ -761,6 +782,7 @@ class PlayState extends MusicBeatSubState
     if (params.targetInstrumental != null) currentInstrumental = params.targetInstrumental;
     isPracticeMode = params.practiceMode ?? false;
     isBotPlayMode = params.botPlayMode ?? false;
+    isMultiplayerMode = params.isMultiplayerMode ?? false;
     isPlaytestResults = params.playtestResults ?? false;
     isMinimalMode = params.minimalMode ?? false;
     startTimestamp = params.startTimestamp ?? 0.0;
@@ -937,6 +959,10 @@ class PlayState extends MusicBeatSubState
 
     initPreciseInputs();
 
+    #if MULTIPLAYER_FEATURE
+    if (isMultiplayerMode) initMultiplayerSync();
+    #end
+
     FlxG.worldBounds.set(0, 0, FlxG.width, FlxG.height);
 
     // The song is loaded and in the process of starting.
@@ -973,6 +999,121 @@ class PlayState extends MusicBeatSubState
     // and it's important to call it last so all elements get affected.
     refresh();
   }
+
+  #if MULTIPLAYER_FEATURE
+  /**
+   * true se EU sou o host dessa partida (o server local que criei no
+   * HostMenuSubState continua vivo). false se eu sou o convidado (nesse
+   * caso multiplayerClient != null).
+   */
+  public static var isMultiplayerHost(get, never):Bool; // bagulho pra bloquear essa porra desse compilador doido.
+
+  static function get_isMultiplayerHost():Bool
+  {
+    return MultiplayerServer.instance != null && MultiplayerServer.instance.running;
+  }
+
+  function initMultiplayerSync():Void
+  {
+    if (isMultiplayerHost && MultiplayerServer.instance != null)
+    {
+      trace('[MP] PlayState sincronizando como HOST (via MultiplayerServer)');
+      MultiplayerServer.instance.onClientMessage = handleMultiplayerMessage;
+      MultiplayerServer.instance.onClientDisconnect = onOpponentDisconnected;
+    }
+    else if (multiplayerClient != null)
+    {
+      trace('[MP] PlayState sincronizando como GUEST (via MultiplayerClient)');
+      multiplayerClient.onMessage = handleMultiplayerMessage;
+      multiplayerClient.onDisconnect = onOpponentDisconnected;
+    }
+    else
+    {
+      trace('[MP] isMultiplayerMode=true mas não achei nem MultiplayerServer.instance nem multiplayerClient. Não vai sincronizar nada.');
+    }
+  }
+
+  /**
+   * Ponto único de envio. goodNoteHit/onNoteMiss/endSong chamam só isso,
+   * sem se preocupar se é host ou guest.
+   */
+  function sendMultiplayerMessage(data:Dynamic):Void
+  {
+    if (isMultiplayerHost && MultiplayerServer.instance != null)
+    {
+      MultiplayerServer.instance.broadcast(data);
+    }
+    else if (multiplayerClient != null)
+    {
+      multiplayerClient.send(data);
+    }
+  }
+
+  function handleMultiplayerMessage(data:Dynamic):Void
+  {
+    if (data == null || !Reflect.hasField(data, 'type')) return;
+
+    switch (Std.string(Reflect.field(data, 'type')))
+    {
+      case 'note_hit':
+        applyRemoteNoteHit(data);
+      case 'note_miss':
+        applyRemoteNoteMiss(data);
+      case 'song_finished':
+        trace('[MP] Oponente terminou a música com score ' + Reflect.field(data, 'songScore'));
+      // TODO: guardar isso pra mostrar comparação na tela de resultado.
+      default:
+        // outros tipos (chat, etc) se vocês adicionarem depois.
+    }
+  }
+
+  // Toca a animação/confirm/splash no lado do oponente sem mexer no
+  // score do jogador local — é só representação visual do que o outro fez.
+
+  function applyRemoteNoteHit(data:Dynamic):Void
+  {
+    if (opponentStrumline == null || opponentStrumline.notes?.members == null) return;
+
+    var direction:Int = Reflect.hasField(data, 'direction') ? Std.int(Reflect.field(data, 'direction')) : -1;
+    if (direction < 0) return;
+
+    // Acha a nota mais próxima ainda viva naquela direção pra "consumir" visualmente.
+    var candidate:Null<NoteSprite> = null;
+    for (note in opponentStrumline.notes.members)
+    {
+      if (note == null || !note.alive) continue;
+      if (note.direction != direction) continue;
+      candidate = note;
+      break;
+    }
+
+    if (candidate != null)
+    {
+      opponentStrumline.hitNote(candidate);
+      opponentStrumline.playConfirm(direction);
+      if (candidate.holdNoteSprite != null) opponentStrumline.playNoteHoldCover(candidate.holdNoteSprite);
+    }
+  }
+
+  function applyRemoteNoteMiss(data:Dynamic):Void
+  {
+    if (opponentStrumline == null) return;
+
+    var direction:Int = Reflect.hasField(data, 'direction') ? Std.int(Reflect.field(data, 'direction')) : -1;
+    if (direction >= 0) opponentStrumline.playPress(direction);
+
+    // Se quiser refletir isso na barra de vida do lado do oponente,
+    // é aqui que entraria (ex: health -= algo, se vocês tiverem HP separado por lado).
+  }
+
+  function onOpponentDisconnected():Void
+  {
+    trace('[MP] Oponente desconectou no meio da partida.');
+    if (!isGamePaused) pause();
+    // TODO: mostrar um aviso "oponente desconectou" no pause, em vez de deixar
+    // o jogador achando que travou.
+  }
+  #end
 
   public function togglePauseButton(visible:Bool = false):Void
   {
@@ -1176,7 +1317,10 @@ class PlayState extends MusicBeatSubState
         {
           // Only do neat & smooth lerps as long as the lerp doesn't fuck up and go WAY behind the music time triggering false resyncs
           final easeRatio:Float = 1.0 - Math.exp(-(MUSIC_EASE_RATIO * playbackRate) * elapsed);
-          Conductor.instance.update(FlxMath.lerp(Conductor.instance.songPosition, FlxG.sound.music.time + Conductor.instance.combinedOffset, easeRatio), false);
+          Conductor.instance.update(
+            FlxMath.lerp(Conductor.instance.songPosition, FlxG.sound.music.time + Conductor.instance.combinedOffset, easeRatio),
+            false
+          );
         }
         else
         {
@@ -1426,7 +1570,10 @@ class PlayState extends MusicBeatSubState
 
   function openPauseSubState(mode:PauseMode, cam:FlxCamera, lostFocus:Bool = false, ?onPause:Void->Void):Void
   {
-    final pauseSubState = new PauseSubState({mode: mode, lostFocus: lostFocus}, onPause);
+    final pauseSubState = new PauseSubState({
+      mode: mode,
+      lostFocus: lostFocus
+    }, onPause);
     FlxTransitionableState.skipNextTransIn = true;
     FlxTransitionableState.skipNextTransOut = true;
     pauseSubState.camera = cam;
@@ -1826,8 +1973,9 @@ class PlayState extends MusicBeatSubState
     {
       throw 'No lastParams to refer to';
     }
-    lastParams.targetSong = SongRegistry.instance.fetchEntry(currentSong.id,
-      {variation: currentVariation}) ?? throw "Could not load current song from ID. This shouldn't happen!";
+    lastParams.targetSong = SongRegistry.instance.fetchEntry(currentSong.id, {
+      variation: currentVariation
+    }) ?? throw "Could not load current song from ID. This shouldn't happen!";
     LoadingState.loadPlayState(lastParams);
   }
 
@@ -1847,10 +1995,12 @@ class PlayState extends MusicBeatSubState
     // This is an arbitrary number chosen so that the camera doesn't move insanely far in when the bop speed is fast.
     final MAX_RELATIVE_CAM_ZOOM:Float = 1.35;
 
-    if (Preferences.zoomCamera
+    if (
+      Preferences.zoomCamera
       && camHUD.zoom < (MAX_RELATIVE_CAM_ZOOM * defaultHUDCameraZoom)
       && cameraZoomRate > 0
-      && (Conductor.instance.currentStep + cameraZoomRateOffset * Constants.STEPS_PER_BEAT) % (cameraZoomRate * Constants.STEPS_PER_BEAT) == 0)
+      && (Conductor.instance.currentStep + cameraZoomRateOffset * Constants.STEPS_PER_BEAT) % (cameraZoomRate * Constants.STEPS_PER_BEAT) == 0
+    )
     {
       // Set zoom multiplier for camera bop.
       cameraBopMultiplier = cameraBopIntensity;
@@ -1904,10 +2054,14 @@ class PlayState extends MusicBeatSubState
         }
       }
 
-      if (!startingSong
-        && (Math.abs(FlxG.sound.music.time - correctSync) > RESYNC_THRESHOLD
+      if (
+        !startingSong
+        && (
+          Math.abs(FlxG.sound.music.time - correctSync) > RESYNC_THRESHOLD
           || Math.abs(playerVoicesError) > RESYNC_THRESHOLD
-          || Math.abs(opponentVoicesError) > RESYNC_THRESHOLD))
+          || Math.abs(opponentVoicesError) > RESYNC_THRESHOLD
+        )
+      )
       {
         trace('VOCALS NEED RESYNC');
         if (vocals != null)
@@ -1988,9 +2142,10 @@ class PlayState extends MusicBeatSubState
      */
   function initHealthBar():Void
   {
-    final isDownscroll:Bool = #if mobile (Preferences.controlsScheme == FunkinHitboxControlSchemes.Arrows
-      && !ControlsHandler.hasExternalInputDevice)
-      || #end Preferences.downscroll;
+    final isDownscroll:Bool = #if mobile (
+      Preferences.controlsScheme == FunkinHitboxControlSchemes.Arrows
+      && !ControlsHandler.hasExternalInputDevice
+    ) || #end Preferences.downscroll;
 
     var healthBarYPos:Float = isDownscroll ? FlxG.height * 0.1 : FlxG.height * 0.9;
 
@@ -2028,9 +2183,10 @@ class PlayState extends MusicBeatSubState
     // Create subtitles if they are enabled.
     if (Preferences.subtitles)
     {
-      final isDownscroll:Bool = #if mobile (Preferences.controlsScheme == FunkinHitboxControlSchemes.Arrows
-        && !ControlsHandler.hasExternalInputDevice)
-        || #end Preferences.downscroll;
+      final isDownscroll:Bool = #if mobile (
+        Preferences.controlsScheme == FunkinHitboxControlSchemes.Arrows
+        && !ControlsHandler.hasExternalInputDevice
+      ) || #end Preferences.downscroll;
 
       final subtitlesAlignment:SubtitlesAlignment = isDownscroll ? SubtitlesAlignment.SUBTITLES_TOP : SubtitlesAlignment.SUBTITLES_BOTTOM;
       subtitles = new Subtitles(0, 139, subtitlesAlignment);
@@ -2251,14 +2407,24 @@ class PlayState extends MusicBeatSubState
     playerStrumline.x = (FlxG.width / 2 + Constants.STRUMLINE_X_OFFSET) + (cutoutSize / 2.0); // Classic style
     // playerStrumline.x = FlxG.width - playerStrumline.width - Constants.STRUMLINE_X_OFFSET; // Centered style
 
-    playerStrumline.y = Preferences.downscroll ? FlxG.height - playerStrumline.height - Constants.STRUMLINE_Y_OFFSET - noteStyle.getStrumlineOffsets()[1] : Constants.STRUMLINE_Y_OFFSET;
+    playerStrumline.y =
+      Preferences.downscroll ? FlxG.height
+        - playerStrumline.height
+        - Constants.STRUMLINE_Y_OFFSET
+        - noteStyle.getStrumlineOffsets()[1]
+        : Constants.STRUMLINE_Y_OFFSET;
 
     playerStrumline.zIndex = 1001;
     playerStrumline.cameras = [camHUD];
 
     // Position the opponent strumline on the left half of the screen
     opponentStrumline.x = Constants.STRUMLINE_X_OFFSET + cutoutSize;
-    opponentStrumline.y = Preferences.downscroll ? FlxG.height - opponentStrumline.height - Constants.STRUMLINE_Y_OFFSET - noteStyle.getStrumlineOffsets()[1] : Constants.STRUMLINE_Y_OFFSET;
+    opponentStrumline.y =
+      Preferences.downscroll ? FlxG.height
+        - opponentStrumline.height
+        - Constants.STRUMLINE_Y_OFFSET
+        - noteStyle.getStrumlineOffsets()[1]
+        : Constants.STRUMLINE_Y_OFFSET;
 
     opponentStrumline.zIndex = 1000;
     opponentStrumline.cameras = [camHUD];
@@ -2370,8 +2536,16 @@ class PlayState extends MusicBeatSubState
     FlxTween.cancelTweensOf(pauseButton);
     FlxTween.cancelTweensOf(pauseCircle);
 
-    FlxTween.tween(pauseButton, {alpha: 1}, 0.25, {ease: FlxEase.quartOut});
-    FlxTween.tween(pauseCircle, {alpha: 0.1}, 0.25, {ease: FlxEase.quartOut});
+    FlxTween.tween(pauseButton, {
+      alpha: 1
+    }, 0.25, {
+      ease: FlxEase.quartOut
+    });
+    FlxTween.tween(pauseCircle, {
+      alpha: 0.1
+    }, 0.25, {
+      ease: FlxEase.quartOut
+    });
   }
   #end
 
@@ -2516,7 +2690,12 @@ class PlayState extends MusicBeatSubState
     Highscore.tallies = new Tallies();
 
     @:nullSafety(Off)
-    var event:SongLoadScriptEvent = new SongLoadScriptEvent(currentChart.song.id, currentChart.difficulty, currentChart.notes.copy(), currentChart.getEvents());
+    var event:SongLoadScriptEvent = new SongLoadScriptEvent(
+      currentChart.song.id,
+      currentChart.difficulty,
+      currentChart.notes.copy(),
+      currentChart.getEvents()
+    );
 
     dispatchEvent(event);
 
@@ -2728,8 +2907,10 @@ class PlayState extends MusicBeatSubState
     // Skip this if the music is paused (GameOver, Pause menu, start-of-song offset, etc.)
     if (!(FlxG.sound.music?.playing ?? false)) return;
 
-    var timeToPlayAt:Float = Math.min(FlxG.sound.music.length - 1,
-      Math.max(Math.min(Conductor.instance.combinedOffset, 0), Conductor.instance.songPosition) - Conductor.instance.combinedOffset);
+    var timeToPlayAt:Float = Math.min(
+      FlxG.sound.music.length - 1,
+      Math.max(Math.min(Conductor.instance.combinedOffset, 0), Conductor.instance.songPosition) - Conductor.instance.combinedOffset
+    );
     trace('Resyncing vocals to ${timeToPlayAt}');
 
     FlxG.sound.music.pause();
@@ -2803,64 +2984,72 @@ class PlayState extends MusicBeatSubState
     if (playerStrumline.notes?.members == null || opponentStrumline.notes?.members == null) return;
 
     // Process notes on the opponent's side.
-    for (note in opponentStrumline.notes.members)
+    // Skip bot if in multiplayer mode (opponent will be controlled remotely)
+    if (!isMultiplayerMode)
     {
-      if (note == null || !note.alive) continue;
-      var r = GRhythmUtil.processWindow(note, false);
-      if (r.botplayHit)
+      for (note in opponentStrumline.notes.members)
       {
-        var event:NoteScriptEvent = new HitNoteScriptEvent(note, 0.0, 0, 'perfect', false, 0);
-        dispatchEvent(event);
-
-        // Calling event.cancelEvent() skips all the other logic! Neat!
-        if (event.eventCanceled) continue;
-
-        if (vocals != null)
+        if (note == null || !note.alive) continue;
+        var r = GRhythmUtil.processWindow(note, false);
+        if (r.botplayHit)
         {
-          if (vocals.legacyVoiceSystem)
+          var event:NoteScriptEvent = new HitNoteScriptEvent(note, 0.0, 0, 'perfect', false, 0);
+          dispatchEvent(event);
+
+          // Calling event.cancelEvent() skips all the other logic! Neat!
+          if (event.eventCanceled) continue;
+
+          if (vocals != null)
           {
-            if (vocals.legacyVoiceUsesPlayer) vocals.playerVolume = playerVocalsVolume;
-            else
-              vocals.opponentVolume = opponentVocalsVolume;
+            if (vocals.legacyVoiceSystem)
+            {
+              if (vocals.legacyVoiceUsesPlayer) vocals.playerVolume = playerVocalsVolume;
+              else
+                vocals.opponentVolume = opponentVocalsVolume;
+            }
           }
-        }
 
-        // Command the opponent to hit the note on time.
-        // NOTE: This is what handles the strumline and cleaning up the note itself!
-        opponentStrumline.hitNote(note);
+          // Command the opponent to hit the note on time.
+          // NOTE: This is what handles the strumline and cleaning up the note itself!
+          opponentStrumline.hitNote(note);
 
-        if (note.holdNoteSprite != null)
-        {
-          opponentStrumline.playNoteHoldCover(note.holdNoteSprite);
+          if (note.holdNoteSprite != null)
+          {
+            opponentStrumline.playNoteHoldCover(note.holdNoteSprite);
+          }
         }
       }
     }
 
     // Process hold notes on the opponent's side.
-    for (holdNote in opponentStrumline.holdNotes.members)
+    // Skip bot if in multiplayer mode (opponent will be controlled remotely)
+    if (!isMultiplayerMode)
     {
-      if (holdNote == null || !holdNote.alive || holdNote.noteData == null) continue;
-
-      // While the hold note is being hit, and there is length on the hold note...
-      if (holdNote.hitNote && !holdNote.missedNote && holdNote.sustainLength > 0)
+      for (holdNote in opponentStrumline.holdNotes.members)
       {
-        // Make sure the opponent keeps singing while the note is held.
-        if (currentStage != null && currentStage.getDad() != null && currentStage.getDad().isSinging())
+        if (holdNote == null || !holdNote.alive || holdNote.noteData == null) continue;
+
+        // While the hold note is being hit, and there is length on the hold note...
+        if (holdNote.hitNote && !holdNote.missedNote && holdNote.sustainLength > 0)
         {
-          currentStage.getDad().holdTimer = 0;
+          // Make sure the opponent keeps singing while the note is held.
+          if (currentStage != null && currentStage.getDad() != null && currentStage.getDad().isSinging())
+          {
+            currentStage.getDad().holdTimer = 0;
+          }
         }
-      }
 
-      if (holdNote.missedNote && !holdNote.handledMiss)
-      {
-        // When the opponent drops a hold note.
-        holdNote.handledMiss = true;
-
-        if (holdNote.scoreable)
+        if (holdNote.missedNote && !holdNote.handledMiss)
         {
-          // We dropped a hold note.
-          // Play miss animation, but don't penalize.
-          if (currentStage != null) currentStage.getOpponent().playSingAnimation(holdNote.noteData.getDirection(), true);
+          // When the opponent drops a hold note.
+          holdNote.handledMiss = true;
+
+          if (holdNote.scoreable)
+          {
+            // We dropped a hold note.
+            // Play miss animation, but don't penalize.
+            if (currentStage != null) currentStage.getOpponent().playSingAnimation(holdNote.noteData.getDirection(), true);
+          }
         }
       }
     }
@@ -3139,8 +3328,16 @@ class PlayState extends MusicBeatSubState
     }
 
     // Send the note hit event.
-    var event:HitNoteScriptEvent = new HitNoteScriptEvent(note, healthChange, score, daRating, isComboBreak,
-      note.scoreable ? Highscore.tallies.combo + 1 : Highscore.tallies.combo, noteDiff, daRating == 'sick');
+    var event:HitNoteScriptEvent = new HitNoteScriptEvent(
+      note,
+      healthChange,
+      score,
+      daRating,
+      isComboBreak,
+      note.scoreable ? Highscore.tallies.combo + 1 : Highscore.tallies.combo,
+      noteDiff,
+      daRating == 'sick'
+    );
     dispatchEvent(event);
 
     // Calling event.cancelEvent() skips all the other logic! Neat!
@@ -3162,6 +3359,19 @@ class PlayState extends MusicBeatSubState
       applyScore(event.score, event.judgement, event.healthChange, event.isComboBreak);
       popUpScore(event.judgement);
     }
+
+    #if MULTIPLAYER_FEATURE
+    if (multiplayerMatchActive)
+    {
+      sendMultiplayerMessage({
+        type: 'note_hit',
+        direction: note.noteData.getDirection(),
+        judgement: daRating,
+        score: score,
+        songPosition: Conductor.instance.songPosition
+      });
+    }
+    #end
   }
 
   /**
@@ -3192,6 +3402,18 @@ class PlayState extends MusicBeatSubState
       if (vocals != null && !tempVocals) vocals.playerVolume = 0;
       FunkinSound.playOnce(Paths.soundRandom('missnote', 1, 3), FlxG.random.float(0.5, 0.6));
     }
+
+    #if MULTIPLAYER_FEATURE
+    if (multiplayerMatchActive)
+    {
+      sendMultiplayerMessage({
+        type: 'note_miss',
+        direction: 0,
+        healthChange: healthChange,
+        songPosition: Conductor.instance.songPosition
+      });
+    }
+    #end
   }
 
   /**
@@ -3302,8 +3524,10 @@ class PlayState extends MusicBeatSubState
     #end
 
     // 9: Toggle the old icon.
-    if ((FlxG.keys.justPressed.NINE #if FEATURE_TOUCH_CONTROLS || (TouchUtil.justPressed && TouchUtil.overlapsComplex(iconP1)) #end)
-      && iconP1 != null) iconP1.toggleOldIcon();
+    if
+      ((FlxG.keys.justPressed.NINE #if FEATURE_TOUCH_CONTROLS || (TouchUtil.justPressed && TouchUtil.overlapsComplex(iconP1)) #end)
+        && iconP1 != null
+      ) iconP1.toggleOldIcon();
 
     final isDebug:Bool = #if FEATURE_DEBUG_FUNCTIONS true #else false #end;
     if (isChartingMode || isDebug)
@@ -3463,8 +3687,10 @@ class PlayState extends MusicBeatSubState
 
     // TODO: This line of code makes me sad, but you can't really fix it without a breaking migration.
     // `easy`, `erect`, `normal-pico`, etc.
-    var suffixedDifficulty = (currentVariation != Constants.DEFAULT_VARIATION
-      && currentVariation != 'erect') ? '$currentDifficulty-${currentVariation}' : currentDifficulty;
+    var suffixedDifficulty = (
+      currentVariation != Constants.DEFAULT_VARIATION
+      && currentVariation != 'erect'
+    ) ? '$currentDifficulty-${currentVariation}' : currentDifficulty;
 
     var isNewHighscore = false;
     var prevScoreData:Null<SaveScoreData> = Save.instance.getSongScore(currentSong.id, suffixedDifficulty);
@@ -3551,6 +3777,16 @@ class PlayState extends MusicBeatSubState
 
     #if FEATURE_MOBILE_ADVERTISEMENTS
     if (AdMobUtil.PLAYING_COUNTER < AdMobUtil.MAX_BEFORE_AD) AdMobUtil.PLAYING_COUNTER++;
+    #end
+
+    #if MULTIPLAYER_FEATURE
+    if (multiplayerMatchActive)
+    {
+      sendMultiplayerMessage({
+        type: 'song_finished',
+        songScore: Std.int(songScore)
+      });
+    }
     #end
 
     if (PlayStatePlaylist.isStoryMode)
@@ -3661,8 +3897,9 @@ class PlayState extends MusicBeatSubState
         }
         else
         {
-          var targetSong:Song = SongRegistry.instance.fetchEntry(targetSongId,
-            {variation: currentVariation}) ?? throw 'Could not find a song with ID $targetSongId';
+          var targetSong:Song = SongRegistry.instance.fetchEntry(targetSongId, {
+            variation: currentVariation
+          }) ?? throw 'Could not find a song with ID $targetSongId';
           var targetVariation:String = currentVariation;
           if (!targetSong.hasDifficulty(PlayStatePlaylist.campaignDifficulty, currentVariation))
           {
@@ -3733,6 +3970,23 @@ class PlayState extends MusicBeatSubState
     {
       // TODO: Uncache the song.
     }
+
+    #if MULTIPLAYER_FEATURE
+    if (isMultiplayerHost && MultiplayerServer.instance != null)
+    {
+      MultiplayerServer.instance.onClientMessage = null;
+      MultiplayerServer.instance.onClientDisconnect = null;
+    }
+    else if (multiplayerClient != null)
+    {
+      multiplayerClient.onMessage = null;
+      multiplayerClient.onDisconnect = null;
+      // Mesma lógica: não desconecta aqui, quem criou o client decide.
+    }
+    multiplayerMatchActive = false;
+    multiplayerMatchId = null;
+    multiplayerClient = null;
+    #end
 
     // Prevent vwoosh timer from running outside PlayState (e.g Chart Editor)
     vwooshTimer.cancel();
@@ -3824,7 +4078,9 @@ class PlayState extends MusicBeatSubState
     FlxG.camera.targetOffset.x += 20;
 
     // Replace zoom animation with a fade out for now.
-    FlxTween.tween(camHUD, {alpha: 0}, 0.6);
+    FlxTween.tween(camHUD, {
+      alpha: 0
+    }, 0.6);
 
     camTransition.fade(FlxColor.BLACK, 0.6, false, function()
     {
@@ -3969,7 +4225,10 @@ class PlayState extends MusicBeatSubState
 
       // Follow tween! Caching it so we can cancel/pause it later if needed.
       var followPos:FlxPoint = cameraFollowPoint.getPosition() - FlxPoint.weak(FlxG.camera.width * 0.5, FlxG.camera.height * 0.5);
-      cameraFollowTween = FlxTween.tween(FlxG.camera.scroll, {x: followPos.x, y: followPos.y}, adjustedDuration, {
+      cameraFollowTween = FlxTween.tween(FlxG.camera.scroll, {
+        x: followPos.x,
+        y: followPos.y
+      }, adjustedDuration, {
         ease: ease,
         onComplete: function(_)
         {
@@ -4014,7 +4273,11 @@ class PlayState extends MusicBeatSubState
     {
       // Zoom tween! Caching it so we can cancel/pause it later if needed.
       var adjustedDuration:Float = duration / playbackRate;
-      cameraZoomTween = FlxTween.tween(this, {currentCameraZoom: targetZoom}, adjustedDuration, {ease: ease});
+      cameraZoomTween = FlxTween.tween(this, {
+        currentCameraZoom: targetZoom
+      }, adjustedDuration, {
+        ease: ease
+      });
 
       if (shouldSubstatePause)
       {
@@ -4077,7 +4340,9 @@ class PlayState extends MusicBeatSubState
 
         scrollSpeedTweens.push(FlxTween.tween(strum, {
           'scrollSpeed': value
-        }, adjustedDuration, {ease: ease}));
+        }, adjustedDuration, {
+          ease: ease
+        }));
       }
       // make sure charts dont break if the charter is dumb and stupid
       prevScrollTargets.push([value, i]);

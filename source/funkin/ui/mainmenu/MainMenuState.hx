@@ -91,7 +91,10 @@ class MainMenuState extends MusicBeatState
   override function create():Void
   {
     #if FEATURE_DISCORD_RPC
-    DiscordClient.instance.setPresence({state: "In the Menus", details: null});
+    DiscordClient.instance.setPresence({
+      state: "In the Menus",
+      details: null
+    });
     #end
 
     FlxG.cameras.reset(new FunkinCamera('mainMenu'));
@@ -211,6 +214,12 @@ class MainMenuState extends MusicBeatState
       });
     }
 
+    // multiplayer menu
+    createMenuItem('online', 'mainmenu/online', function()
+    {
+      startExitState(() -> new funkin.ui.multiplayer.OnlineMenuState());
+    });
+
     if (#if mobile ControlsHandler.usingExternalInputDevice #else true #end)
     {
       createMenuItem('options', 'mainmenu/options', function()
@@ -247,8 +256,13 @@ class MainMenuState extends MusicBeatState
       var targetItem = menuItems.members[2];
       for (_ in 0...8)
       {
-        var sparkle:UpgradeSparkle = new UpgradeSparkle(targetItem.x - (targetItem.width / 2), targetItem.y - (targetItem.height / 2), targetItem.width,
-          targetItem.height, FlxG.random.bool(80));
+        var sparkle:UpgradeSparkle = new UpgradeSparkle(
+          targetItem.x - (targetItem.width / 2),
+          targetItem.y - (targetItem.height / 2),
+          targetItem.width,
+          targetItem.height,
+          FlxG.random.bool(80)
+        );
         upgradeSparkles.add(sparkle);
 
         sparkle.scrollFactor.x = 0.0;
@@ -397,8 +411,10 @@ class MainMenuState extends MusicBeatState
 
   function onMenuItemChange(selected:MenuListItem)
   {
-    if (#if mobile ControlsHandler.usingExternalInputDevice #else true #end) camFollow.setPosition(selected.getGraphicMidpoint().x,
-      selected.getGraphicMidpoint().y);
+    if (#if mobile ControlsHandler.usingExternalInputDevice #else true #end) camFollow.setPosition(
+      selected.getGraphicMidpoint().x,
+      selected.getGraphicMidpoint().y
+    );
   }
 
   #if FEATURE_OPEN_URL
@@ -439,14 +455,26 @@ class MainMenuState extends MusicBeatState
     var fadeOutDuration:Float = 0.4;
     menuItems.forEach(item ->
     {
-      if (rememberedSelectedIndex != item.ID) FlxTween.tween(item, {alpha: 0}, fadeOutDuration, {ease: FlxEase.quadOut});
+      if (rememberedSelectedIndex != item.ID) FlxTween.tween(item, {
+        alpha: 0
+      }, fadeOutDuration, {
+        ease: FlxEase.quadOut
+      });
       else
         item.visible = false;
     });
 
     #if mobile
-    if (optionsButton != null) FlxTween.tween(optionsButton, {alpha: 0}, fadeOutDuration, {ease: FlxEase.quadOut});
-    if (backButton != null) FlxTween.tween(backButton, {alpha: 0}, fadeOutDuration, {ease: FlxEase.quadOut});
+    if (optionsButton != null) FlxTween.tween(optionsButton, {
+      alpha: 0
+    }, fadeOutDuration, {
+      ease: FlxEase.quadOut
+    });
+    if (backButton != null) FlxTween.tween(backButton, {
+      alpha: 0
+    }, fadeOutDuration, {
+      ease: FlxEase.quadOut
+    });
     #end
 
     FlxTimer.wait(fadeOutDuration, () ->
