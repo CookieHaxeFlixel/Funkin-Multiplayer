@@ -1,32 +1,54 @@
 package funkin.ui.multiplayer;
 
 import flixel.FlxG;
+import flixel.FlxSprite;
 import flixel.text.FlxText;
-import flixel.ui.FlxButton;
-import flixel.math.FlxPoint;
 import funkin.graphics.FunkinSprite;
 import funkin.ui.MusicBeatSubState;
 import funkin.multiplayer.MultiplayerAccountManager;
-import funkin.api.discord.auth.DiscordAuthServer;
-import funkin.api.discord.auth.DiscordAuthServer.DiscordProfile;
+import funkin.multiplayer.RemoteImageLoader;
+
+// import funkin.api.discord.auth.DiscordAuthServer;
+// import funkin.api.discord.auth.DiscordAuthServer.DiscordProfile;
 
 /**
  * Card que aparece por cima da OnlineMenuState quando a conta ainda
- * não tem login do Discord vinculado. Fundo é o FunkinSprite
- * "bgAttentionInternet" (só tem anim idle), com um botão roxo
- * "Logar com Discord" por cima.
+ * não tem login do Discord vinculado.
+ *
+ * TEMPORARIAMENTE: o fluxo manual (abrir navegador, OAuth de verdade)
+ * tá comentado lá embaixo (ver `startManualDiscordLogin`) — ele exigia
+ * um DISCORD_CLIENT_ID de verdade configurado no DiscordAuthServer, que
+ * ainda tá com o placeholder 'COLOQUE_SEU_CLIENT_ID_AQUI', então o
+ * login de verdade nem tinha como funcionar ainda. Enquanto isso não
+ * for configurado, essa tela faz um AUTO-LOGIN local: gera um perfil
+ * "fake" a partir da conta local (mesmo username, avatar padrão do
+ * Discord) e já vincula, sem precisar abrir navegador nenhum. Assim que
+ * o client ID real existir, é só trocar `attemptAutoLogin()` por
+ * `startManualDiscordLogin()` no create() lá embaixo.
+ *
+ * Mostra "Logado como X" + avatar se conseguir, ou "não foi possível
+ * logar" se der erro. De qualquer jeito, fecha sozinho depois de 5
+ * segundos. ESC ou ENTER fecham na hora, sem esperar o timer.
  */
 class LoginSubState extends MusicBeatSubState
 {
+  #if MULTIPLAYER_FEATURE
   var account:Dynamic;
   var onLoggedIn:Null<(profile:DiscordProfile) -> Void>;
   var dim:Null<FunkinSprite> = null;
   var cardSprite:Null<FunkinSprite> = null;
   var titleText:Null<FlxText> = null;
-  var loginButton:Null<FlxButton> = null;
   var statusText:Null<FlxText> = null;
-  var authServer:Null<DiscordAuthServer> = null;
-  var loginHovered:Bool = false;
+  var avatarSprite:Null<FlxSprite> = null;
+  // Fica null enquanto ainda não tentou o login; true = sucesso, false = falhou.
+  var loginSucceeded:Null<Bool> = null;
+  var closeTimer:Float = 0;
+
+  static inline final AUTO_CLOSE_AFTER:Float = 5.0;
+
+  // ---- Fluxo manual antigo (comentado, ver nota da classe) ----
+  // var authServer:Null<DiscordAuthServer> = null;
+  // var loginButton:Null<flixel.ui.FlxButton> = null;
 
   public function new(account:Dynamic, ?onLoggedIn:(profile:DiscordProfile) -> Void)
   {
@@ -52,78 +74,188 @@ class LoginSubState extends MusicBeatSubState
     cardSprite.screenCenter();
     add(cardSprite);
 
-    titleText = new FlxText(cardSprite.x, cardSprite.y + 24, cardSprite.width, 'FAÇA LOGIN PRA JOGAR ONLINE', 20);
+    titleText = new FlxText(cardSprite.x, cardSprite.y + 24, cardSprite.width, 'ENTRANDO...', 20);
     titleText.setFormat(Paths.font('vcr.ttf'), 20, 0xFFFFFFFF, CENTER);
     add(titleText);
 
-    statusText = new FlxText(cardSprite.x, cardSprite.y + cardSprite.height - 70, cardSprite.width, '', 16);
+    avatarSprite = new FlxSprite(0, cardSprite.y + 60);
+    avatarSprite.makeGraphic(64, 64, 0xFF4A4A4A);
+    avatarSprite.x = cardSprite.x + (cardSprite.width - avatarSprite.width) / 2;
+    avatarSprite.visible = false;
+    add(avatarSprite);
+
+    statusText = new FlxText(cardSprite.x, cardSprite.y + cardSprite.height - 70, cardSprite.width, 'Entrando automaticamente...', 16);
     statusText.setFormat(Paths.font('vcr.ttf'), 16, 0xFFB7C8FF, CENTER);
     add(statusText);
 
-    // ---- Botão roxo "Logar com Discord" ----
-    loginButton = new FlxButton(0, 0, 'LOGAR COM DISCORD', onLoginPressed);
-    loginButton.color = 0xFF5865F2; // roxo/azulado, cor da marca do Discord
-    loginButton.label.color = 0xFFFFFFFF;
-    loginButton.scale.set(1.4, 1.4);
-    loginButton.updateHitbox();
-    loginButton.x = cardSprite.x + (cardSprite.width - loginButton.width) / 2;
-    loginButton.y = cardSprite.y + cardSprite.height - 110;
-    add(loginButton);
+    // ---- Fluxo novo: auto-login local, sem navegador ----
+    attemptAutoLogin();
+
+    // ---- Fluxo manual antigo (Discord OAuth de verdade pelo navegador) ----
+    // Descomenta isso (e comenta o attemptAutoLogin() acima) assim que
+    // o DISCORD_CLIENT_ID real estiver configurado no DiscordAuthServer:
+    //
+    // loginButton = new flixel.ui.FlxButton(0, 0, 'LOGAR COM DISCORD', startManualDiscordLogin);
+    // loginButton.color = 0xFF5865F2;
+    // loginButton.label.color = 0xFFFFFFFF;
+    // loginButton.scale.set(1.4, 1.4);
+    // loginButton.updateHitbox();
+    // loginButton.x = cardSprite.x + (cardSprite.width - loginButton.width) / 2;
+    // loginButton.y = cardSprite.y + cardSprite.height - 110;
+    // add(loginButton);
   }
 
-  function onLoginPressed():Void
+  /**
+   * Auto-login local: sem bater em nenhum servidor, sem abrir
+   * navegador. Gera um "perfil" a partir da própria conta local
+   * (username igual, avatar padrão do Discord) e já vincula. Serve pra
+   * destravar o fluxo de teste enquanto o OAuth de verdade não tá
+   * configurado — troca pra startManualDiscordLogin() quando tiver.
+   */
+  function attemptAutoLogin():Void
   {
-    if (statusText != null) statusText.text = 'Abrindo navegador pra login...';
-
-    authServer = new DiscordAuthServer(8083);
-    authServer.onLogin = onDiscordLogin;
-
     try
     {
-      authServer.start();
-      authServer.openLoginPage();
+      if (account == null) throw 'conta local inválida (null)';
+
+      var username:String = Std.string(Reflect.field(account, 'username'));
+      if (username == null || username.length == 0) throw 'conta sem username';
+
+      var fakeId:String = 'local_' + Std.string(Reflect.field(account, 'id'));
+      var fakeAvatarUrl:String = 'https://cdn.discordapp.com/embed/avatars/' + Std.string(Std.int(Math.random() * 5)) + '.png';
+
+      var profile:DiscordProfile = {
+        id: fakeId,
+        username: username,
+        discriminator: '0',
+        avatarUrl: fakeAvatarUrl
+      };
+
+      MultiplayerAccountManager.linkDiscordAccount(account, profile);
+      onAutoLoginResult(true, profile);
     }
     catch (e:Dynamic)
     {
-      trace('[Login] falha ao abrir servidor de auth: ' + e);
-      if (statusText != null) statusText.text = 'Falha ao abrir o navegador. Tenta de novo.';
+      trace('[Login] auto-login falhou: ' + e);
+      onAutoLoginResult(false, null);
     }
   }
 
-  // Chamado (de outra thread) quando o navegador manda o perfil do Discord de volta.
-
-  function onDiscordLogin(profile:DiscordProfile):Void
+  function onAutoLoginResult(success:Bool, ?profile:DiscordProfile):Void
   {
-    trace('[Login] logado como ' + profile.username);
+    loginSucceeded = success;
+    closeTimer = 0;
 
-    // Volta pra main thread antes de mexer em sprites/flixel.
-    haxe.MainLoop.runInMainThread(() ->
+    if (success && profile != null)
     {
-      // NOTA: presumindo que MultiplayerAccountManager tem esse método.
-      // Se o nome real for diferente, só trocar aqui.
-      MultiplayerAccountManager.linkDiscordAccount(account, profile);
-
-      if (statusText != null) statusText.text = 'Logado como ' + profile.username + '!';
-
-      if (authServer != null)
+      if (titleText != null) titleText.text = profile.username;
+      if (statusText != null)
       {
-        authServer.stop();
-        authServer = null;
+        statusText.text = 'Logado! Fechando em alguns segundos...';
+        statusText.color = 0xFFB7C8FF;
+      }
+
+      if (avatarSprite != null)
+      {
+        avatarSprite.visible = true;
+        RemoteImageLoader.loadInto(avatarSprite, profile.avatarUrl, () ->
+        {
+          if (avatarSprite == null || cardSprite == null) return;
+          avatarSprite.setGraphicSize(64, 64);
+          avatarSprite.updateHitbox();
+          avatarSprite.x = cardSprite.x + (cardSprite.width - avatarSprite.width) / 2;
+        });
       }
 
       if (onLoggedIn != null) onLoggedIn(profile);
-
-      close();
-    });
+    }
+    else
+    {
+      if (titleText != null) titleText.text = 'não foi possível logar';
+      if (statusText != null)
+      {
+        statusText.text = 'Tenta de novo mais tarde. Fechando...';
+        statusText.color = 0xFFE74C3C;
+      }
+    }
   }
 
+  override function update(elapsed:Float):Void
+  {
+    super.update(elapsed);
+
+    // ---- Teclado: ESC ou ENTER fecham na hora ----
+    if (FlxG.keys.justPressed.ESCAPE || FlxG.keys.justPressed.ENTER || FlxG.keys.justPressed.SPACE)
+    {
+      close();
+      return;
+    }
+
+    // ---- Fecha sozinho depois de 5s, contando só a partir do
+    // resultado (sucesso ou falha) já estar na tela ----
+    if (loginSucceeded != null)
+    {
+      closeTimer += elapsed;
+      if (closeTimer >= AUTO_CLOSE_AFTER)
+      {
+        close();
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Fluxo manual antigo (Discord OAuth de verdade). Comentado por
+  // enquanto — ver nota no topo da classe. Preservado aqui pra quando
+  // o DISCORD_CLIENT_ID real for configurado.
+  // ---------------------------------------------------------------
+
+  /*
+    function startManualDiscordLogin():Void
+    {
+      if (statusText != null) statusText.text = 'Abrindo navegador pra login...';
+
+      authServer = new DiscordAuthServer(8083);
+      authServer.onLogin = onDiscordLogin;
+
+      try
+      {
+        authServer.start();
+        authServer.openLoginPage();
+      }
+      catch (e:Dynamic)
+      {
+        trace('[Login] falha ao abrir servidor de auth: ' + e);
+        if (statusText != null) statusText.text = 'Falha ao abrir o navegador. Tenta de novo.';
+      }
+    }
+
+    function onDiscordLogin(profile:DiscordProfile):Void
+    {
+      trace('[Login] logado como ' + profile.username);
+
+      // Volta pra main thread antes de mexer em sprites/flixel.
+      haxe.MainLoop.runInMainThread(() ->
+      {
+        MultiplayerAccountManager.linkDiscordAccount(account, profile);
+
+        if (authServer != null)
+        {
+          authServer.stop();
+          authServer = null;
+        }
+
+        onAutoLoginResult(true, profile);
+      });
+    }
+   */
   override function destroy():Void
   {
-    if (authServer != null)
-    {
-      authServer.stop();
-      authServer = null;
-    }
+    // if (authServer != null)
+    // {
+    //   authServer.stop();
+    //   authServer = null;
+    // }
     super.destroy();
   }
+  #end
 }

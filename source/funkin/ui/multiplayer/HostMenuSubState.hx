@@ -6,32 +6,28 @@ import flixel.ui.FlxButton;
 import funkin.graphics.FunkinSprite;
 import funkin.ui.MusicBeatSubState;
 import funkin.multiplayer.MultiplayerServer;
-import funkin.multiplayer.MultiplayerInviteService;
-import funkin.multiplayer.MultiplayerAccountManager;
-import funkin.play.PlayState;
-import funkin.play.song.Song;
-import funkin.data.song.SongRegistry;
-import funkin.ui.transition.LoadingState;
+import funkin.multiplayer.MultiplayerHostSession;
+import funkin.audio.FunkinSound;
 
 /**
  * Card que abre por cima da OnlineMenuState quando o jogador clica em HOST.
- * Sobe um MultiplayerServer local. O botão PLAY só fica utilizável
- * quando o segundo jogador (o client) se conecta (2/2).
+ * Sobe um MultiplayerServer local e espera o convidado conectar.
+ *
+ * Botão LIGAR/DESLIGAR (era o antigo PLAY): fica travado (cinza,
+ * "DESLIGADO") até o convidado conectar (2/2). Quando liga, a
+ * HostMenuSubState fecha e o `onClosed(true)` avisa a OnlineMenuState
+ * pra trocar de tela pro Freeplay, onde o host escolhe a música. A
+ * seleção de música NÃO acontece mais aqui dentro — ver
+ * MultiplayerHostSession pra saber onde ela é retomada.
+ *
+ * Navegação: setas/WASD alternam entre CONVIDAR e LIGAR/DESLIGAR,
+ * ENTER/SPACE confirma, ESC fecha o card (igual o resto do menu).
  */
 class HostMenuSubState extends MusicBeatSubState
 {
+  #if MULTIPLAYER_FEATURE
   var account:Dynamic;
   var onClosed:(success:Bool) -> Void;
-
-  /**
-   * Preencha isso com a música/dificuldade escolhida antes de abrir o card,
-   * ou pluga aqui a tela de seleção de música do seu freeplay.
-   * Sem isso o PLAY não tem o que carregar no PlayState.
-   */
-  public var targetSongId:Null<String> = null;
-  public var targetDifficulty:String = 'normal';
-  public var targetVariation:String = 'default';
-
   var cardBg:Null<FunkinSprite> = null;
   var dim:Null<FunkinSprite> = null;
   var titleText:Null<FlxText> = null;
@@ -39,20 +35,33 @@ class HostMenuSubState extends MusicBeatSubState
   var portText:Null<FlxText> = null;
   var countText:Null<FlxText> = null;
   var serverIdText:Null<FlxText> = null;
-  var playButton:Null<FlxButton> = null;
+  var toggleButton:Null<FlxButton> = null;
   var inviteButton:Null<FlxButton> = null;
   var closeButton:Null<FlxButton> = null;
-
   var server:Null<MultiplayerServer> = null;
   var serverId:String = '';
   var port:Int = 2082;
-
-  // guardadas pra dar unregister certinho no MultiplayerInviteService quando o card fechar
-  var onInviteAcceptedHandler:Null<String->Void> = null;
-  var onInviteDeclinedHandler:Null<String->Void> = null;
-
   // Só fica true quando o segundo jogador conecta.
   var playerReady:Bool = false;
+
+  /**
+   * Endereço que o RELAY vai mandar pro convidado quando ele apertar
+   * ACCEPT — é pra ONDE o MultiplayerClient dele vai tentar conectar.
+   *
+   * '127.0.0.1' só funciona se host e convidado estiverem na MESMA
+   * máquina (dois processos do jogo abertos, útil só pra teste). Pra
+   * convidar alguém de verdade (outra máquina/rede), troca isso antes
+   * de abrir o HostMenuSubState pelo seu IP local (mesma rede/LAN) ou,
+   * pra internet, o IP público / domínio DuckDNS da máquina que tá
+   * hospedando, com a porta ($port) liberada no roteador.
+   */
+  public var hostAddress:String = '127.0.0.1';
+
+  // ---- Navegação por teclado ----
+  // 0 = CONVIDAR, 1 = LIGAR/DESLIGAR
+  var selectedIndex:Int = 0;
+
+  static final OPTION_COUNT:Int = 2;
 
   public function new(account:Dynamic, onClosed:(success:Bool) -> Void)
   {
@@ -100,15 +109,16 @@ class HostMenuSubState extends MusicBeatSubState
     serverIdText.setFormat(Paths.font('vcr.ttf'), 20, 0xFFB7C8FF, CENTER);
     add(serverIdText);
 
-    // Só é "clicável de verdade" quando playerReady == true (checado no onPlayPressed).
-    playButton = new FlxButton(cardX + (cardW / 2) - 60, cardY + cardH - 90, 'PLAY', onPlayPressed);
-    playButton.scale.set(1.6, 1.6);
-    playButton.updateHitbox();
-    add(playButton);
-    updatePlayButtonVisual();
+    // Botão LIGAR/DESLIGAR — só é "clicável de verdade" quando
+    // playerReady == true (checado no onTogglePressed).
+    toggleButton = new FlxButton(cardX + (cardW / 2) - 70, cardY + cardH - 90, 'DESLIGADO', onTogglePressed);
+    toggleButton.scale.set(1.6, 1.6);
+    toggleButton.updateHitbox();
+    add(toggleButton);
+    updateToggleVisual();
 
     // Botão pra convidar alguém pelo nick do Discord. Fica do lado
-    // esquerdo do PLAY, sempre clicável (não depende do playerReady).
+    // esquerdo do toggle, sempre clicável (não depende do playerReady).
     inviteButton = new FlxButton(cardX + 30, cardY + cardH - 90, 'CONVIDAR', onInvitePressed);
     inviteButton.color = 0xFF5865F2; // roxo/azulado, cor da marca do Discord
     inviteButton.label.color = 0xFFFFFFFF;
@@ -120,63 +130,14 @@ class HostMenuSubState extends MusicBeatSubState
     closeButton.color = 0xFF8B8B8B;
     add(closeButton);
 
-    connectToInviteService();
     startHosting();
-  }
-
-  /**
-   * Garante que o MultiplayerInviteService tá conectado no relay e
-   * registrado com o Discord dessa conta (se tiver vinculado), e escuta
-   * quando o convite que a gente mandar for aceito/recusado — é o gatilho
-   * pra trocar o server de LAN pra relay.
-   */
-  function connectToInviteService():Void
-  {
-    var invites = MultiplayerInviteService.instance;
-
-    // idempotente: se a OnlineMenuState já chamou isso, não faz nada de novo.
-    invites.connect();
-
-    if (MultiplayerAccountManager.isDiscordLinked(account))
-    {
-      invites.setIdentity(Std.string(Reflect.field(account, 'discordId')), Std.string(Reflect.field(account, 'discordUsername')),
-        Std.string(Reflect.field(account, 'discordAvatarUrl')));
-    }
-
-    invites.onInviteAccepted = onInviteAcceptedHandler = (sessionId:String) ->
-    {
-      if (sessionId != serverId) return; // convite de outra sessão, ignora
-
-      if (playerReady)
-      {
-        trace('[Host] convite aceito mas já tem alguém conectado (LAN), ignorando.');
-        return;
-      }
-
-      trace('[Host] convidado aceitou pelo Discord, trocando o server pro modo relay.');
-
-      if (server != null)
-      {
-        // troca o transporte sem perder onClientConnect/onClientMessage/onClientDisconnect,
-        // que continuam plugados na mesma instância.
-        server.stop();
-        server.startRelay(serverId);
-      }
-    };
-
-    invites.onInviteDeclined = onInviteDeclinedHandler = (sessionId:String) ->
-    {
-      if (sessionId != serverId) return;
-      trace('[Host] convite recusado.');
-    };
   }
 
   function generateServerId():String
   {
     final chars:String = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     var id:String = '';
-    for (i in 0...6)
-      id += chars.charAt(Std.int(Math.random() * chars.length));
+    for (i in 0...6) id += chars.charAt(Std.int(Math.random() * chars.length));
     return id;
   }
 
@@ -191,7 +152,7 @@ class HostMenuSubState extends MusicBeatSubState
         trace('[Host] client conectou');
         playerReady = true;
         if (countText != null) countText.text = '2/2';
-        updatePlayButtonVisual();
+        updateToggleVisual();
       };
 
       server.onClientDisconnect = () ->
@@ -200,7 +161,7 @@ class HostMenuSubState extends MusicBeatSubState
         playerReady = false;
         if (countText != null) countText.text = '1/2';
         if (matchupText != null) matchupText.text = Std.string(account.username) + ' vs. ???';
-        updatePlayButtonVisual();
+        updateToggleVisual();
       };
 
       server.onClientMessage = (data:Dynamic) ->
@@ -226,124 +187,123 @@ class HostMenuSubState extends MusicBeatSubState
 
   function onInvitePressed():Void
   {
-    trace('[Host] CONVIDAR clicado, abrindo busca por nick do Discord');
+    trace('[Host] CONVIDAR clicado, abrindo busca por nick do Discord (endereço enviado: $hostAddress:$port)');
     // Mesma package (funkin.ui.multiplayer), não precisa de import extra.
-    openSubState(new InviteSearchSubState(serverId, port));
+    openSubState(new InviteSearchSubState(serverId, hostAddress, port));
   }
 
-  function updatePlayButtonVisual():Void
+  function updateToggleVisual():Void
   {
-    if (playButton == null) return;
-    // Verde quando liberado, cinza (travado) quando ainda é 1/2.
-    playButton.color = playerReady ? 0xFF3B82F6 : 0xFF4A4A4A;
+    if (toggleButton == null) return;
+    if (playerReady)
+    {
+      toggleButton.label.text = 'LIGAR';
+      toggleButton.color = 0xFF2ECC71; // verde, pronto pra ligar
+    }
+    else
+    {
+      toggleButton.label.text = 'DESLIGADO';
+      toggleButton.color = 0xFF4A4A4A; // cinza, travado
+    }
   }
 
-  function onPlayPressed():Void
+  function onTogglePressed():Void
   {
     // Trava real: só passa daqui se os dois jogadores estiverem conectados.
     if (!playerReady)
     {
-      trace('[Host] PLAY ignorado, esperando o segundo jogador ainda');
+      trace('[Host] toggle ignorado, esperando o segundo jogador ainda');
       return;
     }
 
-    if (targetSongId == null)
-    {
-      trace('[Host] ERRO: nenhuma música foi selecionada antes de abrir o HostMenuSubState (targetSongId == null)');
-      if (portText != null) portText.text = 'Selecione uma música antes de dar PLAY.';
-      return;
-    }
+    trace('[Host] LIGADO — indo pro Freeplay escolher a música');
 
-    trace('[Host] PLAY pressionado, indo pro PlayState em modo multiplayer');
+    MultiplayerHostSession.active = true;
+    MultiplayerHostSession.serverId = serverId;
 
-    // Avisa o client pra começar também.
-    if (server != null)
-    {
-      server.broadcast({
-        type: 'match_start',
-        songId: targetSongId,
-        difficulty: targetDifficulty,
-        variation: targetVariation
-      });
-    }
-
-    goToMultiplayerPlayState();
-  }
-
-  function goToMultiplayerPlayState():Void
-  {
-    if (targetSongId == null) return;
-
-    var song:Null<Song> = SongRegistry.instance.fetchEntry(targetSongId);
-    if (song == null)
-    {
-      trace('[Host] música não encontrada: ' + targetSongId);
-      return;
-    }
-
-    #if MULTIPLAYER_FEATURE
-    // O host NÃO vira client de si mesmo (o MultiplayerServer só aceita
-    // uma conexão de cada vez, e essa vaga já é do convidado). O host
-    // fala com o convidado direto pelo MultiplayerServer.instance
-    // (server.broadcast / server.onClientMessage), que o PlayState
-    // detecta sozinho. multiplayerClient fica null aqui de propósito.
-    PlayState.multiplayerClient = null;
-    PlayState.multiplayerMatchActive = true;
-    PlayState.multiplayerMatchId = serverId;
-    #end
-
-    // NOTA: não chama server.stop() aqui (closeCard(true) já não chama,
-    // já que só para quando success == false). O server precisa continuar
-    // rodando durante a partida inteira pra sincronizar os dois lados.
-    closeCard(true);
-
-    LoadingState.loadPlayState({
-      targetSong: song,
-      targetDifficulty: targetDifficulty,
-      targetVariation: targetVariation,
-      isMultiplayerMode: true
-    });
+    // NOTA: não chama server.stop() aqui — o servidor precisa continuar
+    // rodando pra avisar o convidado quando a música for escolhida no
+    // Freeplay (ver MultiplayerHostSession.startMatch).
+    if (onClosed != null) onClosed(true);
+    close();
   }
 
   function onClosePressed():Void
   {
-    closeCard(false);
-  }
-
-  // não pode se chamar "close" - o FlxSubState já tem um close() sem argumentos
-  function closeCard(success:Bool):Void
-  {
-    if (server != null && !success)
+    if (server != null)
     {
       server.stop();
     }
-    unregisterFromInviteService();
-    if (onClosed != null) onClosed(success);
+    MultiplayerHostSession.cancel();
+    if (onClosed != null) onClosed(false);
     close();
-  }
-
-  /** Tira os callbacks daqui do MultiplayerInviteService pra não disparar num card já fechado. */
-  function unregisterFromInviteService():Void
-  {
-    var invites = MultiplayerInviteService.instance;
-    if (invites.onInviteAccepted == onInviteAcceptedHandler) invites.onInviteAccepted = null;
-    if (invites.onInviteDeclined == onInviteDeclinedHandler) invites.onInviteDeclined = null;
   }
 
   override function update(elapsed:Float):Void
   {
     super.update(elapsed);
 
+    // ---- Navegação por teclado: setas/WASD alternam CONVIDAR <-> LIGAR ----
+    final pressedNext:Bool = FlxG.keys.justPressed.RIGHT || FlxG.keys.justPressed.D || FlxG.keys.justPressed.DOWN || FlxG.keys.justPressed.S;
+    final pressedPrev:Bool = FlxG.keys.justPressed.LEFT || FlxG.keys.justPressed.A || FlxG.keys.justPressed.UP || FlxG.keys.justPressed.W;
+
+    if (pressedNext)
+    {
+      selectedIndex = (selectedIndex + 1) % OPTION_COUNT;
+      FunkinSound.playOnce(Paths.sound('scrollMenu'));
+    }
+    else if (pressedPrev)
+    {
+      selectedIndex = (selectedIndex - 1 + OPTION_COUNT) % OPTION_COUNT;
+      FunkinSound.playOnce(Paths.sound('scrollMenu'));
+    }
+
+    if (FlxG.keys.justPressed.ENTER || FlxG.keys.justPressed.SPACE)
+    {
+      switch (selectedIndex)
+      {
+        case 0:
+          onInvitePressed();
+        case 1:
+          onTogglePressed();
+      }
+    }
+
     if (FlxG.keys.justPressed.ESCAPE)
     {
       onClosePressed();
+    }
+
+    updateSelectionVisuals();
+  }
+
+  function updateSelectionVisuals():Void
+  {
+    if (inviteButton != null)
+    {
+      final selected:Bool = selectedIndex == 0;
+      inviteButton.scale.set(selected ? 1.3 : 1.2, selected ? 1.3 : 1.2);
+      inviteButton.updateHitbox();
+    }
+
+    if (toggleButton != null)
+    {
+      final selected:Bool = selectedIndex == 1;
+      toggleButton.scale.set(selected ? 1.7 : 1.6, selected ? 1.7 : 1.6);
+      toggleButton.updateHitbox();
     }
   }
 
   override function destroy():Void
   {
-    if (server != null) server.stop();
-    unregisterFromInviteService();
+    // Só derruba o servidor se a partida NÃO tiver sido iniciada — se
+    // MultiplayerHostSession.active for true, o servidor precisa
+    // continuar rodando até o match_start ser mandado do Freeplay.
+    if (server != null && !MultiplayerHostSession.active)
+    {
+      server.stop();
+    }
     super.destroy();
   }
+  #end
 }

@@ -3,62 +3,62 @@ package funkin.multiplayer.relay;
 #if sys
 import haxe.Json;
 import haxe.io.Bytes;
+import haxe.crypto.Base64;
+import haxe.crypto.Sha1;
 import sys.net.Host;
 import sys.net.Socket;
 import sys.thread.Thread;
 import sys.thread.Mutex;
 
 /**
- * Servidor relay standalone. NÃO é pra rodar dentro do jogo — é um
- * processo separado, num servidor/VPS com IP público, que:
+ * Servidor central de matchmaking/convites (o "relay").
  *
- *   1. Deixa cada instância do jogo se registrar com o discordId de quem
- *      logou (login/discord já resolvidos no client, isso aqui só guarda
- *      "esse discordId tá online nesse socket").
- *   2. Responde busca de usuário por nick (search_user).
- *   3. Entrega convite (invite) pro discordId de destino, e a resposta
- *      dele (invite_response) de volta pra quem convidou.
- *   4. Depois que o convite é aceito, faz o relay puro de mensagens
- *      (relay_data) entre host e convidado sob um sessionId — isso é o
- *      que resolve o problema de host e convidado estarem em redes/NAT
- *      diferentes, sem precisar de port-forward manual.
+ * Diferente do MultiplayerServer (que só aceita 1 conexão, pra uma
+ * partida 1x1 direta entre host e convidado), esse aqui aceita VÁRIAS
+ * conexões ao mesmo tempo — uma pra cada jogador com o jogo aberto — e
+ * faz só três coisas:
+ *   1. guarda quem tá online agora (register)
+ *   2. deixa buscar gente por nick do Discord (search_user)
+ *   3. entrega convite de um pro outro, mesmo que estejam em redes
+ *      diferentes e não saibam o IP um do outro (invite / invite_response)
  *
- * Compile isso separado do jogo (veja relay.hxml), não faz parte do
- * build do V-Slice.
+ * A partida em si (o gameplay sincronizado, os inputs, etc) continua
+ * indo pelo MultiplayerServer/MultiplayerClient direto entre host e
+ * convidado — esse relay aqui só ajuda os dois a se acharem. Depois que
+ * o convite é aceito, esse servidor não participa mais da partida.
+ *
+ * Protocolo (JSON sobre WebSocket cru, mesmo formato de frame que
+ * MultiplayerServer/MultiplayerClient já usam):
+ *
+ *   cliente -> relay:
+ *     { type: 'register', discordId, username, avatarUrl }
+ *     { type: 'search_user', query, requestId }
+ *     { type: 'invite', targetDiscordId, hostServerId, hostAddress, hostPort, requestId }
+ *     { type: 'invite_response', inviteId, accept }
+ *
+ *   relay -> cliente:
+ *     { type: 'registered' }
+ *     { type: 'search_result', requestId, results: [{discordId, username, avatarUrl}, ...] }
+ *     { type: 'invite_sent', requestId, inviteId }
+ *     { type: 'invite_error', requestId, message }
+ *     { type: 'invite_received', inviteId, fromDiscordId, fromUsername, fromAvatarUrl, hostServerId, hostAddress, hostPort }
+ *     { type: 'invite_response', inviteId, accept, fromDiscordId, fromUsername }
  */
 class RelayServer
 {
-  public static function main():Void
-  {
-    var port:Int = 8090;
-    var args = Sys.args();
-    if (args.length > 0)
-    {
-      var parsed = Std.parseInt(args[0]);
-      if (parsed != null) port = parsed;
-    }
+  public var port:Int;
+  public var running:Bool = false;
 
-    var server = new RelayServer(port);
-    server.start();
-
-    Sys.println('[RelayServer] rodando na porta $port. Ctrl+C pra parar.');
-    while (true)
-    {
-      Sys.sleep(60);
-    }
-  }
-
-  var port:Int;
-  var listener:Null<Socket>;
-  var running:Bool = false;
-
+  var server:Null<Socket>;
+  var acceptThread:Null<Thread> = null;
   var mutex:Mutex = new Mutex();
-  var clients:Map<String, ClientConn> = new Map(); // connId -> conn
-  var byDiscordId:Map<String, ClientConn> = new Map(); // discordId -> conn
-  var pendingInvites:Map<String, ClientConn> = new Map(); // sessionId -> quem convidou
-  var sessions:Map<String, Array<ClientConn>> = new Map(); // sessionId -> [conn, conn]
 
-  var nextConnId:Int = 0;
+  // id interno de conexão (não é o discordId) -> estado da conexão
+  var connections:Map<String, RelayConnection> = new Map();
+
+  // inviteId -> id interno de conexão de quem MANDOU o convite, pra
+  // saber pra quem devolver o invite_response depois.
+  var pendingInvites:Map<String, String> = new Map();
 
   public function new(port:Int = 8090)
   {
@@ -69,301 +69,425 @@ class RelayServer
   {
     if (running) return;
 
-    listener = new Socket();
-    listener.setFastSend(true);
-    listener.bind(new Host("0.0.0.0"), port);
-    listener.listen(64);
+    server = new Socket();
+    server.setFastSend(true);
+    server.setTimeout(1000);
+    server.bind(new Host("0.0.0.0"), port);
+    server.listen(64);
     running = true;
-
-    Thread.create(acceptLoop);
+    acceptThread = Thread.create(runAcceptLoop);
+    log('rodando na porta $port');
   }
 
   public function stop():Void
   {
     running = false;
-    if (listener != null)
+
+    mutex.acquire();
+    for (conn in connections)
     {
       try
-        listener.close()
+        conn.socket.close()
       catch (_)
       {
       }
-      listener = null;
+    }
+    connections = new Map();
+    mutex.release();
+
+    if (server != null)
+    {
+      try
+        server.close()
+      catch (_)
+      {
+      }
+      server = null;
     }
   }
 
-  function acceptLoop():Void
+  function runAcceptLoop():Void
   {
-    while (running && listener != null)
+    while (running && server != null)
     {
       try
       {
-        var sock:Socket = listener.accept();
+        var sock:Socket = server.accept();
         if (sock == null) continue;
-
-        var conn = new ClientConn(sock, Std.string(nextConnId++));
-        Thread.create(() -> handleClient(conn));
+        Thread.create(() -> handleClient(sock));
       }
-      catch (e:Dynamic)
+      catch (_)
       {
-        if (running) Sys.println('[RelayServer] erro no accept: $e');
       }
     }
   }
 
-  function handleClient(conn:ClientConn):Void
+  function handleClient(sock:Socket):Void
   {
+    var connId:String = generateId();
+
     try
     {
-      WebSocketUtil.performServerHandshake(conn.socket);
+      performHandshake(sock);
     }
     catch (e:Dynamic)
     {
-      Sys.println('[RelayServer] handshake falhou: $e');
-      safeClose(conn);
+      log('handshake falhou ($connId): $e');
+      try
+        sock.close()
+      catch (_)
+      {
+      }
       return;
     }
 
+    var conn:RelayConnection = new RelayConnection(connId, sock);
+
     mutex.acquire();
-    clients.set(conn.id, conn);
+    connections.set(connId, conn);
+    var total:Int = Lambda.count(connections);
     mutex.release();
+    log('cliente conectado ($connId), total online: $total');
 
     while (running)
     {
-      var text:Null<String> = null;
-      try
-      {
-        text = WebSocketUtil.readFrameText(conn.socket, () -> conn.send({type: 'pong'}));
-      }
-      catch (e:Dynamic)
-      {
-        break;
-      }
-
+      var text:Null<String> = readFrameText(sock);
       if (text == null) break;
       if (text.length == 0) continue;
 
       var data:Dynamic = null;
       try
-      {
-        data = Json.parse(text);
-      }
+        data = Json.parse(text)
       catch (e:Dynamic)
       {
         continue;
       }
 
-      handleMessage(conn, data);
+      try
+        handleMessage(conn, data)
+      catch (e:Dynamic)
+      {
+        log('erro processando mensagem de $connId: $e');
+      }
     }
 
-    onDisconnect(conn);
+    mutex.acquire();
+    connections.remove(connId);
+    mutex.release();
+    try
+      sock.close()
+    catch (_)
+    {
+    }
+    log('cliente desconectado ($connId)');
   }
 
-  function handleMessage(conn:ClientConn, data:Dynamic):Void
+  function handleMessage(conn:RelayConnection, data:Dynamic):Void
   {
     var type:String = Std.string(Reflect.field(data, 'type'));
 
     switch (type)
     {
       case 'register':
-        conn.discordId = Std.string(Reflect.field(data, 'discordId'));
-        conn.username = Std.string(Reflect.field(data, 'username'));
-        conn.avatarUrl = Std.string(Reflect.field(data, 'avatarUrl'));
-
-        mutex.acquire();
-        byDiscordId.set(conn.discordId, conn);
-        mutex.release();
-
-        conn.send({type: 'registered', discordId: conn.discordId});
+        conn.discordId = fieldStr(data, 'discordId');
+        conn.username = fieldStr(data, 'username');
+        conn.avatarUrl = fieldStr(data, 'avatarUrl');
+        sendTo(conn, {type: 'registered'});
+        log('registrado: ${conn.username} (${conn.discordId}) conn=${conn.id}');
 
       case 'search_user':
-        var query:String = Std.string(Reflect.field(data, 'query')).toLowerCase();
-        var requestId:String = Std.string(Reflect.field(data, 'requestId'));
+        var query:Null<String> = fieldStr(data, 'query');
+        var requestId:Null<String> = fieldStr(data, 'requestId');
         var results:Array<Dynamic> = [];
 
-        mutex.acquire();
-        for (c in byDiscordId)
+        if (query != null && query.length > 0)
         {
-          if (c.username != null && c.username.toLowerCase().indexOf(query) != -1 && c.discordId != conn.discordId)
+          var queryLower:String = query.toLowerCase();
+          mutex.acquire();
+          for (other in connections)
           {
-            results.push({discordId: c.discordId, username: c.username, avatarUrl: c.avatarUrl});
-          }
-        }
-        mutex.release();
+            if (other.id == conn.id) continue;
+            if (other.username == null) continue;
+            if (other.username.toLowerCase().indexOf(queryLower) == -1) continue;
 
-        conn.send({type: 'search_result', requestId: requestId, results: results});
+            results.push({
+              discordId: other.discordId,
+              username: other.username,
+              avatarUrl: other.avatarUrl
+            });
+          }
+          mutex.release();
+        }
+
+        sendTo(conn, {type: 'search_result', requestId: requestId, results: results});
 
       case 'invite':
-        var targetDiscordId:String = Std.string(Reflect.field(data, 'targetDiscordId'));
-        var sessionId:String = Std.string(Reflect.field(data, 'sessionId'));
-
-        mutex.acquire();
-        var target:Null<ClientConn> = byDiscordId.get(targetDiscordId);
-        mutex.release();
+        var targetDiscordId:Null<String> = fieldStr(data, 'targetDiscordId');
+        var requestId:Null<String> = fieldStr(data, 'requestId');
+        var target:Null<RelayConnection> = findByDiscordId(targetDiscordId);
 
         if (target == null)
         {
-          conn.send({type: 'invite_error', sessionId: sessionId, reason: 'user_offline'});
+          sendTo(conn, {type: 'invite_error', requestId: requestId, message: 'jogador offline ou não encontrado'});
           return;
         }
 
+        var inviteId:String = generateId();
         mutex.acquire();
-        pendingInvites.set(sessionId, conn);
+        pendingInvites.set(inviteId, conn.id);
         mutex.release();
 
-        target.send({
+        sendTo(target, {
           type: 'invite_received',
-          sessionId: sessionId,
+          inviteId: inviteId,
           fromDiscordId: conn.discordId,
           fromUsername: conn.username,
           fromAvatarUrl: conn.avatarUrl,
-          hostServerId: Reflect.field(data, 'hostServerId'),
-          hostPort: Reflect.field(data, 'hostPort')
+          hostServerId: fieldStr(data, 'hostServerId'),
+          hostAddress: fieldStr(data, 'hostAddress'),
+          hostPort: fieldInt(data, 'hostPort')
         });
 
-        conn.send({type: 'invite_sent', sessionId: sessionId});
+        sendTo(conn, {type: 'invite_sent', requestId: requestId, inviteId: inviteId});
+        log('convite $inviteId: ${conn.username} -> ${target.username}');
 
       case 'invite_response':
-        var sessionId:String = Std.string(Reflect.field(data, 'sessionId'));
-        var accept:Bool = Reflect.field(data, 'accept') == true;
+        var inviteId:Null<String> = fieldStr(data, 'inviteId');
+        if (inviteId == null) return;
+        var accept:Bool = Reflect.hasField(data, 'accept') && Reflect.field(data, 'accept') == true;
 
         mutex.acquire();
-        var inviter:Null<ClientConn> = pendingInvites.get(sessionId);
-        if (!accept) pendingInvites.remove(sessionId);
+        var senderConnId:Null<String> = pendingInvites.get(inviteId);
+        if (senderConnId != null) pendingInvites.remove(inviteId);
+        var sender:Null<RelayConnection> = (senderConnId != null) ? connections.get(senderConnId) : null;
         mutex.release();
 
-        if (inviter != null)
+        if (sender != null)
         {
-          inviter.send({
+          sendTo(sender, {
             type: 'invite_response',
-            sessionId: sessionId,
+            inviteId: inviteId,
             accept: accept,
             fromDiscordId: conn.discordId,
             fromUsername: conn.username
           });
         }
 
-      case 'relay_join':
-        var sessionId:String = Std.string(Reflect.field(data, 'sessionId'));
-
-        mutex.acquire();
-        var arr:Array<ClientConn> = sessions.exists(sessionId) ? sessions.get(sessionId) : [];
-        if (arr.indexOf(conn) == -1) arr.push(conn);
-        sessions.set(sessionId, arr);
-        mutex.release();
-
-        conn.send({type: 'relay_joined', sessionId: sessionId, peers: arr.length});
-
-        // avisa o outro lado (se já tiver entrado) que o par está pronto
-        for (peer in arr)
-        {
-          if (peer != conn) peer.send({type: 'relay_peer_ready', sessionId: sessionId});
-        }
-
-      case 'relay_data':
-        var sessionId:String = Std.string(Reflect.field(data, 'sessionId'));
-        var payload:Dynamic = Reflect.field(data, 'payload');
-
-        mutex.acquire();
-        var arr:Null<Array<ClientConn>> = sessions.get(sessionId);
-        mutex.release();
-
-        if (arr == null) return;
-        for (peer in arr)
-        {
-          if (peer != conn) peer.send({type: 'relay_data', sessionId: sessionId, payload: payload});
-        }
-
-      case 'relay_leave':
-        var sessionId:String = Std.string(Reflect.field(data, 'sessionId'));
-        leaveSession(conn, sessionId);
-
       default:
-      // tipo desconhecido, ignora
+        // tipo desconhecido, ignora
     }
   }
 
-  function leaveSession(conn:ClientConn, sessionId:String):Void
+  function findByDiscordId(discordId:Null<String>):Null<RelayConnection>
   {
+    if (discordId == null) return null;
+
     mutex.acquire();
-    var arr:Null<Array<ClientConn>> = sessions.get(sessionId);
-    if (arr != null)
+    var found:Null<RelayConnection> = null;
+    for (other in connections)
     {
-      arr.remove(conn);
-      if (arr.length == 0)
+      if (other.discordId == discordId)
       {
-        sessions.remove(sessionId);
-      }
-      else
-      {
-        sessions.set(sessionId, arr);
-        for (peer in arr) peer.send({type: 'relay_peer_left', sessionId: sessionId});
+        found = other;
+        break;
       }
     }
     mutex.release();
+    return found;
   }
 
-  function onDisconnect(conn:ClientConn):Void
-  {
-    mutex.acquire();
-    clients.remove(conn.id);
-    if (conn.discordId != null && byDiscordId.get(conn.discordId) == conn)
-    {
-      byDiscordId.remove(conn.discordId);
-    }
-    for (sessionId => arr in sessions)
-    {
-      if (arr.indexOf(conn) != -1)
-      {
-        arr.remove(conn);
-        sessions.set(sessionId, arr);
-        for (peer in arr) peer.send({type: 'relay_peer_left', sessionId: sessionId});
-      }
-    }
-    mutex.release();
-
-    safeClose(conn);
-  }
-
-  function safeClose(conn:ClientConn):Void
+  function sendTo(conn:RelayConnection, data:Dynamic):Void
   {
     try
-      conn.socket.close()
+    {
+      var frame:Bytes = buildFrame(Json.stringify(data));
+      conn.writeMutex.acquire();
+      try
+      {
+        conn.socket.output.writeBytes(frame, 0, frame.length);
+        conn.socket.output.flush();
+      }
+      catch (e:Dynamic)
+      {
+        conn.writeMutex.release();
+        throw e;
+      }
+      conn.writeMutex.release();
+    }
     catch (_)
     {
     }
+  }
+
+  static function fieldStr(data:Dynamic, name:String):Null<String>
+  {
+    if (!Reflect.hasField(data, name)) return null;
+    var v:Dynamic = Reflect.field(data, name);
+    return (v == null) ? null : Std.string(v);
+  }
+
+  static function fieldInt(data:Dynamic, name:String):Int
+  {
+    if (!Reflect.hasField(data, name)) return 0;
+    var v:Dynamic = Reflect.field(data, name);
+    return (v == null) ? 0 : Std.int(v);
+  }
+
+  function log(msg:String):Void
+  {
+    Sys.println('[Relay] ' + msg);
+  }
+
+  static function generateId():String
+  {
+    final chars:String = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    var id:String = '';
+    for (i in 0...16)
+      id += chars.charAt(Std.int(Math.random() * chars.length));
+    return id;
+  }
+
+  // --------------------- protocolo WebSocket (mesmo formato do MultiplayerServer) ---------------------
+
+  function performHandshake(sock:Socket):Void
+  {
+    var requestLine:String = sock.input.readLine();
+    if (requestLine == null) throw "handshake sem request line";
+
+    var headers:Map<String, String> = new Map();
+    while (true)
+    {
+      var line:String = sock.input.readLine();
+      if (line == null || line == "") break;
+      var idx:Int = line.indexOf(":");
+      if (idx >= 0)
+      {
+        headers.set(line.substring(0, idx).trim().toLowerCase(), line.substring(idx + 1).trim());
+      }
+    }
+
+    var key:Null<String> = headers.get("sec-websocket-key");
+    if (key == null) throw "sem sec-websocket-key";
+
+    var acceptKey = Sha1.make(Bytes.ofString(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"));
+    var accept:String = Base64.encode(acceptKey);
+
+    sock.output.writeString('HTTP/1.1 101 Switching Protocols\r\n');
+    sock.output.writeString('Upgrade: websocket\r\n');
+    sock.output.writeString('Connection: Upgrade\r\n');
+    sock.output.writeString('Sec-WebSocket-Accept: $accept\r\n\r\n');
+    sock.output.flush();
+  }
+
+  function readFrameText(sock:Socket):Null<String>
+  {
+    var firstByte:Int;
+    var secondByte:Int;
+    try
+    {
+      firstByte = sock.input.readByte();
+      secondByte = sock.input.readByte();
+    }
+    catch (_)
+    {
+      return null;
+    }
+
+    var opcode:Int = firstByte & 0x0F;
+    var masked:Bool = (secondByte & 0x80) != 0;
+    var length:Int = secondByte & 0x7F;
+
+    if (length == 126)
+    {
+      length = sock.input.readUInt16();
+    }
+    else if (length == 127)
+    {
+      length = Std.int(sock.input.readDouble());
+    }
+
+    var maskKey:Null<Bytes> = null;
+    if (masked)
+    {
+      maskKey = sock.input.read(4);
+    }
+
+    var payload:Bytes = sock.input.read(length);
+    if (masked && maskKey != null)
+    {
+      for (i in 0...payload.length)
+      {
+        payload.set(i, payload.get(i) ^ maskKey.get(i % 4));
+      }
+    }
+
+    if (opcode == 0x8)
+    {
+      return null;
+    }
+
+    return payload.toString();
+  }
+
+  static function buildFrame(payload:String):Bytes
+  {
+    var bytes:Bytes = Bytes.ofString(payload);
+    var header:Array<Int> = [0x81];
+    var payloadLength:Int = bytes.length;
+
+    if (payloadLength <= 125)
+    {
+      header.push(payloadLength);
+    }
+    else if (payloadLength <= 65535)
+    {
+      header.push(126);
+      header.push((payloadLength >> 8) & 0xFF);
+      header.push(payloadLength & 0xFF);
+    }
+    else
+    {
+      header.push(127);
+      var len:Array<Int> = [
+        0,
+        0,
+        0,
+        0,
+        (payloadLength >> 24) & 0xFF,
+        (payloadLength >> 16) & 0xFF,
+        (payloadLength >> 8) & 0xFF,
+        payloadLength & 0xFF
+      ];
+      for (v in len) header.push(v);
+    }
+
+    var out:Bytes = Bytes.alloc(header.length + bytes.length);
+    var offset:Int = 0;
+    for (i in 0...header.length)
+    {
+      out.set(offset++, header[i]);
+    }
+    for (i in 0...bytes.length)
+    {
+      out.set(offset++, bytes.get(i));
+    }
+    return out;
   }
 }
 
-private class ClientConn
+class RelayConnection
 {
-  public var socket:Socket;
   public var id:String;
+  public var socket:Socket;
   public var discordId:Null<String> = null;
   public var username:Null<String> = null;
   public var avatarUrl:Null<String> = null;
+  public var writeMutex:Mutex = new Mutex();
 
-  var writeMutex:Mutex = new Mutex();
-
-  public function new(socket:Socket, id:String)
+  public function new(id:String, socket:Socket)
   {
-    this.socket = socket;
     this.id = id;
-  }
-
-  public function send(data:Dynamic):Void
-  {
-    writeMutex.acquire();
-    try
-    {
-      var frame:Bytes = WebSocketUtil.buildFrame(Json.stringify(data));
-      socket.output.writeBytes(frame, 0, frame.length);
-      socket.output.flush();
-    }
-    catch (_)
-    {
-    }
-    writeMutex.release();
+    this.socket = socket;
   }
 }
 #end

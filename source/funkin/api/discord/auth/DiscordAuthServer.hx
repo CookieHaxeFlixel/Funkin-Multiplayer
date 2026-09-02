@@ -336,7 +336,7 @@ class DiscordAuthServer
   </div>
 
 <script>
-  var DISCORD_CLIENT_ID = 'COLOQUE_SEU_CLIENT_ID_AQUI';
+  var DISCORD_CLIENT_ID = '1544258994292658216';
   var REDIRECT_URI = window.location.origin + '/';
   var WS_URL = 'ws://' + window.location.host + '/';
 

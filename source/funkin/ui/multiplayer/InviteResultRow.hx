@@ -12,16 +12,25 @@ import funkin.multiplayer.RemoteImageLoader;
  * Uma linha dentro do InviteSearchSubState: avatar do Discord + nick +
  * botão "CONVIDAR". Vira "ENVIADO" (travado) depois de clicado, pra não
  * mandar o mesmo convite duas vezes.
+ *
+ * `setSelected()` é o destaque visual usado pela navegação por teclado
+ * do InviteSearchSubState (setas cima/baixo entre os resultados).
  */
 class InviteResultRow extends FlxSpriteGroup
 {
+  #if MULTIPLAYER_FEATURE
   public var info(default, null):InviteInfo;
 
+  var rowBg:FunkinSprite;
   var avatarSprite:FlxSprite;
   var nickText:FlxText;
   var inviteButton:FlxButton;
   var onInvitePressed:InviteInfo->Void;
   var invited:Bool = false;
+  var selected:Bool = false;
+
+  static inline final BG_NORMAL:Int = 0xFF232E45;
+  static inline final BG_SELECTED:Int = 0xFF32436B;
 
   public function new(x:Float, y:Float, width:Float, info:InviteInfo, onInvitePressed:InviteInfo->Void)
   {
@@ -29,8 +38,8 @@ class InviteResultRow extends FlxSpriteGroup
     this.info = info;
     this.onInvitePressed = onInvitePressed;
 
-    var rowBg:FunkinSprite = new FunkinSprite(0, 0);
-    rowBg.makeSolidColor(Std.int(width), 56, 0xFF232E45);
+    rowBg = new FunkinSprite(0, 0);
+    rowBg.makeSolidColor(Std.int(width), 56, BG_NORMAL);
     add(rowBg);
 
     avatarSprite = new FlxSprite(6, 4);
@@ -54,6 +63,22 @@ class InviteResultRow extends FlxSpriteGroup
     add(inviteButton);
   }
 
+  /** Destaque visual quando essa linha tá selecionada pelo teclado. */
+  public function setSelected(value:Bool):Void
+  {
+    if (selected == value) return;
+    selected = value;
+
+    if (rowBg != null) rowBg.makeSolidColor(Std.int(rowBg.width), Std.int(rowBg.height), selected ? BG_SELECTED : BG_NORMAL);
+    scale.set(selected ? 1.02 : 1.0, selected ? 1.02 : 1.0);
+  }
+
+  /** Confirma o convite dessa linha (chamado pelo clique OU pelo ENTER do teclado). */
+  public function confirm():Void
+  {
+    pressInvite();
+  }
+
   function pressInvite():Void
   {
     if (invited) return;
@@ -67,4 +92,5 @@ class InviteResultRow extends FlxSpriteGroup
 
     if (onInvitePressed != null) onInvitePressed(info);
   }
+  #end
 }
