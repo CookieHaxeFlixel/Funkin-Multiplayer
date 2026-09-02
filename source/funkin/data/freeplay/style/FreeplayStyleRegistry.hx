@@ -7,8 +7,7 @@ import funkin.util.tools.ISingleton;
 import funkin.data.DefaultRegistryImpl;
 
 @:nullSafety
-class FreeplayStyleRegistry extends BaseRegistry<FreeplayStyle, FreeplayStyleData, FreeplayStyleEntryParams> implements ISingleton
-    implements DefaultRegistryImpl
+class FreeplayStyleRegistry extends BaseRegistry<FreeplayStyle, FreeplayStyleData, FreeplayStyleEntryParams> implements ISingleton implements DefaultRegistryImpl
 {
   /**
    * The current version string for the style data format.

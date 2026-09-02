@@ -19,6 +19,7 @@ import funkin.ui.transition.LoadingState;
 
 class OnlineMenuState extends MusicBeatState
 {
+  #if MULTIPLAYER_FEATURE
   var bg:Null<FunkinSprite> = null;
   var title:Null<FlxText> = null;
   var subtitle:Null<FlxText> = null;
@@ -128,8 +129,10 @@ class OnlineMenuState extends MusicBeatState
     // tela estiver aberta. openSubState empilha por cima do que já tiver
     // aberto (ex: LoginSubState), então convite chegando durante o login
     // não se perde, só fica esperando na fila do flixel.
-    MultiplayerInviteService.instance.connect();
-    MultiplayerInviteService.instance.onInviteReceived = onInviteReceived;
+    // Passa currentAccount já aqui pra se registrar no relay imediatamente
+    // (com username local, mesmo antes do Discord ser vinculado).
+    // MultiplayerInviteService.instance.connect(currentAccount);
+    // MultiplayerInviteService.instance.onInviteReceived = onInviteReceived;
 
     FunkinSound.playMusic('chartEditorloop', {
       overrideExisting: true,
@@ -153,6 +156,11 @@ class OnlineMenuState extends MusicBeatState
         {
           statusText.text = 'Conta ativa: ' + Std.string(currentAccount.username) + ' | ID: ' + Std.string(currentAccount.id) + ' | 1/2 connected';
         }
+
+        // Acabou de vincular o Discord: manda a identidade atualizada
+        // (nick/avatar reais) pro relay, senão ele continua achando
+        // que você é só o username local.
+        MultiplayerInviteService.instance.updateIdentity(currentAccount);
       }));
     }
   }
@@ -358,7 +366,7 @@ class OnlineMenuState extends MusicBeatState
   function onInviteReceived(invite:InviteInfo):Void
   {
     trace('[MP] convite recebido de ' + invite.username);
-    openSubState(new InviteNotificationSubState(invite));
+    openSubState(new InviteNotificationSubState(invite, currentAccount));
   }
 
   // Abre o card do host por cima da tela, como no rascunho (card em baixo)
@@ -373,9 +381,23 @@ class OnlineMenuState extends MusicBeatState
       hostLocked = false;
       if (hostButton != null) hostButton.animation.play('idle', true);
 
-      if (success && statusText != null)
+      if (success)
       {
-        statusText.text = 'Indo pra partida...';
+        // Host apertou LIGAR: sai da OnlineMenuState de vez e vai pro
+        // Freeplay escolher a música. O MultiplayerServer continua
+        // rodando (não foi parado no HostMenuSubState.destroy) porque
+        // MultiplayerHostSession.active == true nesse momento.
+        //
+        // ATENÇÃO: não tenho o FreeplayState.hx de vocês, então não sei
+        // o nome/pacote exato da classe nem como ela reporta "música
+        // confirmada". Troquei aqui por um placeholder — troca
+        // `funkin.ui.freeplay.FreeplayState` pelo caminho real, e do
+        // lado de dentro do Freeplay chama
+        // `MultiplayerHostSession.startMatch(song, difficulty, variation)`
+        // no lugar de onde ele hoje chama LoadingState.loadPlayState,
+        // sempre que `MultiplayerHostSession.active` for true.
+        if (statusText != null) statusText.text = 'Indo pro Freeplay escolher a música...';
+        FlxG.switchState(() -> new funkin.ui.freeplay.FreeplayState());
       }
       else if (statusText != null)
       {
@@ -393,4 +415,5 @@ class OnlineMenuState extends MusicBeatState
     }
     super.destroy();
   }
+  #end
 }

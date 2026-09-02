@@ -41,7 +41,7 @@ class SongRegistry extends BaseRegistry<Song, SongMetadata, SongEntryParams> imp
 
   public function new()
   {
-    super('SONG', 'songs', SONG_METADATA_VERSION_RULE);
+    super('SONG', 'gameplay/songs', SONG_METADATA_VERSION_RULE);
   }
 
   override public function loadEntries():Void
@@ -81,7 +81,7 @@ class SongRegistry extends BaseRegistry<Song, SongMetadata, SongEntryParams> imp
     //
     // UNSCRIPTED ENTRIES
     //
-    var entryIdList:Array<String> = DataAssets.listDataFilesInPath('songs/', '-metadata.json').map(function(songDataPath:String):String
+    var entryIdList:Array<String> = DataAssets.listDataFilesInPath('gameplay/songs/', '-metadata.json').map(function(songDataPath:String):String
     {
       return songDataPath.split('/')[0];
     });
@@ -181,7 +181,10 @@ class SongRegistry extends BaseRegistry<Song, SongMetadata, SongEntryParams> imp
 
     switch (loadEntryMetadataFile(id, variation))
     {
-      case {fileName: fileName, contents: contents}:
+      case {
+        fileName: fileName,
+        contents: contents
+      }:
         parser.fromJson(contents, fileName);
       default:
         return null;
@@ -234,8 +237,7 @@ class SongRegistry extends BaseRegistry<Song, SongMetadata, SongEntryParams> imp
     }
   }
 
-  public function parseEntryMetadataRawWithMigration(contents:String, ?fileName:String = 'raw', version:thx.semver.Version,
-      ?variation:String):Null<SongMetadata>
+  public function parseEntryMetadataRawWithMigration(contents:String, ?fileName:String = 'raw', version:thx.semver.Version, ?variation:String):Null<SongMetadata>
   {
     // If a version rule is not specified, do not check against it.
     if (SONG_METADATA_VERSION_RULE == null || VersionUtil.validateVersion(version, SONG_METADATA_VERSION_RULE))
@@ -265,7 +267,10 @@ class SongRegistry extends BaseRegistry<Song, SongMetadata, SongEntryParams> imp
 
     switch (loadEntryMetadataFile(id, variation))
     {
-      case {fileName: fileName, contents: contents}:
+      case {
+        fileName: fileName,
+        contents: contents
+      }:
         parser.fromJson(contents, fileName);
       default:
         return null;
@@ -287,7 +292,10 @@ class SongRegistry extends BaseRegistry<Song, SongMetadata, SongEntryParams> imp
 
     switch (loadEntryMetadataFile(id, variation))
     {
-      case {fileName: fileName, contents: contents}:
+      case {
+        fileName: fileName,
+        contents: contents
+      }:
         parser.fromJson(contents, fileName);
       default:
         return null;
@@ -337,7 +345,10 @@ class SongRegistry extends BaseRegistry<Song, SongMetadata, SongEntryParams> imp
 
     switch (loadMusicDataFile(id, variation))
     {
-      case {fileName: fileName, contents: contents}:
+      case {
+        fileName: fileName,
+        contents: contents
+      }:
         parser.fromJson(contents, fileName);
       default:
         return null;
@@ -402,7 +413,10 @@ class SongRegistry extends BaseRegistry<Song, SongMetadata, SongEntryParams> imp
 
     switch (loadEntryChartFile(id, variation))
     {
-      case {fileName: fileName, contents: contents}:
+      case {
+        fileName: fileName,
+        contents: contents
+      }:
         parser.fromJson(contents, fileName);
       default:
         return null;
@@ -447,8 +461,7 @@ class SongRegistry extends BaseRegistry<Song, SongMetadata, SongEntryParams> imp
     }
   }
 
-  public function parseEntryChartDataRawWithMigration(contents:String, ?fileName:String = 'raw', version:thx.semver.Version,
-      ?variation:String):Null<SongChartData>
+  public function parseEntryChartDataRawWithMigration(contents:String, ?fileName:String = 'raw', version:thx.semver.Version, ?variation:String):Null<SongChartData>
   {
     // If a version rule is not specified, do not check against it.
     if (SONG_CHART_DATA_VERSION_RULE == null || VersionUtil.validateVersion(version, SONG_CHART_DATA_VERSION_RULE))
@@ -473,7 +486,10 @@ class SongRegistry extends BaseRegistry<Song, SongMetadata, SongEntryParams> imp
     var rawJson:Null<String> = openfl.Assets.getText(entryFilePath);
     if (rawJson == null) return null;
     rawJson = rawJson.trim();
-    return {fileName: entryFilePath, contents: rawJson};
+    return {
+      fileName: entryFilePath,
+      contents: rawJson
+    };
   }
 
   function loadMusicDataFile(id:String, ?variation:String):Null<JsonFile>
@@ -484,7 +500,10 @@ class SongRegistry extends BaseRegistry<Song, SongMetadata, SongEntryParams> imp
     var rawJson:String = openfl.Assets.getText(entryFilePath);
     if (rawJson == null) return null;
     rawJson = rawJson.trim();
-    return {fileName: entryFilePath, contents: rawJson};
+    return {
+      fileName: entryFilePath,
+      contents: rawJson
+    };
   }
 
   function loadEntryChartFile(id:String, ?variation:String):Null<JsonFile>
@@ -495,7 +514,10 @@ class SongRegistry extends BaseRegistry<Song, SongMetadata, SongEntryParams> imp
     var rawJson:String = openfl.Assets.getText(entryFilePath);
     if (rawJson == null) return null;
     rawJson = rawJson.trim();
-    return {fileName: entryFilePath, contents: rawJson};
+    return {
+      fileName: entryFilePath,
+      contents: rawJson
+    };
   }
 
   public function fetchEntryMetadataVersion(id:String, ?variation:String):Null<thx.semver.Version>

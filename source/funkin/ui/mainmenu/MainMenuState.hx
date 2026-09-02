@@ -215,10 +215,12 @@ class MainMenuState extends MusicBeatState
     }
 
     // multiplayer menu
+    #if MULTIPLAYER_FEATURE
     createMenuItem('online', 'mainmenu/online', function()
     {
       startExitState(() -> new funkin.ui.multiplayer.OnlineMenuState());
     });
+    #end
 
     if (#if mobile ControlsHandler.usingExternalInputDevice #else true #end)
     {

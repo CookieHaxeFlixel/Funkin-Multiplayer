@@ -24,7 +24,7 @@ class PlayerRegistry extends BaseRegistry<PlayableCharacter, PlayerData, PlayerE
 
   public function new()
   {
-    super('PLAYER', 'players', PLAYER_DATA_VERSION_RULE);
+    super('PLAYER', 'gameplay/playable-characters', PLAYER_DATA_VERSION_RULE);
   }
 
   override public function loadEntries():Void

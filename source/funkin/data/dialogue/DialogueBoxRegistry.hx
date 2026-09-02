@@ -20,7 +20,7 @@ class DialogueBoxRegistry extends BaseRegistry<DialogueBox, DialogueBoxData, Dia
 
   public function new()
   {
-    super('DIALOGUEBOX', 'dialogue/boxes', DIALOGUEBOX_DATA_VERSION_RULE);
+    super('DIALOGUEBOX', 'gameplay/dialogue/boxes', DIALOGUEBOX_DATA_VERSION_RULE);
   }
 }
 

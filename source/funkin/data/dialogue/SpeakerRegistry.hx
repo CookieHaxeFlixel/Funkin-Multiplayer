@@ -19,7 +19,7 @@ class SpeakerRegistry extends BaseRegistry<Speaker, SpeakerData, SpeakerEntryPar
 
   public function new()
   {
-    super('SPEAKER', 'dialogue/speakers', SPEAKER_DATA_VERSION_RULE);
+    super('SPEAKER', 'gameplay/dialogue/speakers', SPEAKER_DATA_VERSION_RULE);
   }
 }
 

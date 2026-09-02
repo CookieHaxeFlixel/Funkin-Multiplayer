@@ -19,7 +19,7 @@ class StickerRegistry extends BaseRegistry<StickerPack, StickerData, StickerEntr
 
   public function new()
   {
-    super('STICKER', 'stickerpacks', STICKER_DATA_VERSION_RULE);
+    super('STICKER', 'ui/loading/stickers/stickerpacks', STICKER_DATA_VERSION_RULE);
   }
 
   public function fetchDefault():StickerPack
@@ -43,7 +43,10 @@ class StickerRegistry extends BaseRegistry<StickerPack, StickerData, StickerEntr
 
     switch (loadEntryFile(id))
     {
-      case {fileName: fileName, contents: contents}:
+      case {
+        fileName: fileName,
+        contents: contents
+      }:
         parser.fromJson(contents, fileName);
       default:
         return null;

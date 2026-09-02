@@ -19,7 +19,7 @@ class ConversationRegistry extends BaseRegistry<Conversation, ConversationData, 
 
   public function new()
   {
-    super('CONVERSATION', 'dialogue/conversations', CONVERSATION_DATA_VERSION_RULE);
+    super('CONVERSATION', 'gameplay/dialogue/conversations', CONVERSATION_DATA_VERSION_RULE);
   }
 }
 

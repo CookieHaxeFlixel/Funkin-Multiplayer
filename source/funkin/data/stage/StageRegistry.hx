@@ -19,7 +19,7 @@ class StageRegistry extends BaseRegistry<Stage, StageData, StageEntryParams> imp
 
   public function new()
   {
-    super('STAGE', 'stages', STAGE_DATA_VERSION_RULE);
+    super('STAGE', 'gameplay/stages', STAGE_DATA_VERSION_RULE);
   }
 }
 

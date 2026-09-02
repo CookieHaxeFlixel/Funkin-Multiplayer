@@ -19,7 +19,7 @@ class LevelRegistry extends BaseRegistry<Level, LevelData, LevelEntryParams> imp
 
   public function new()
   {
-    super('LEVEL', 'levels', LEVEL_DATA_VERSION_RULE);
+    super('LEVEL', 'ui/story-mode/levels', LEVEL_DATA_VERSION_RULE);
   }
 
   /**
