@@ -81,9 +81,9 @@ class FunkinMemory
     permanentCacheSound(Paths.sound('confirmMenu'));
     permanentCacheSound(Paths.sound('screenshot'));
     permanentCacheSound(Paths.sound('scrollMenu'));
-    permanentCacheSound(Paths.sound('soundtray/Voldown'));
-    permanentCacheSound(Paths.sound('soundtray/VolMAX'));
-    permanentCacheSound(Paths.sound('soundtray/Volup'));
+    permanentCacheSound(Paths.sound('ui/soundtray/volume-down'));
+    permanentCacheSound(Paths.sound('ui/soundtray/volume-max'));
+    permanentCacheSound(Paths.sound('ui/soundtray/volume-up'));
     permanentCacheSound(Paths.music('freakyMenu/freakyMenu'));
     permanentCacheSound(Paths.music('offsetsLoop/offsetsLoop'));
     permanentCacheSound(Paths.music('offsetsLoop/drumsLoop'));

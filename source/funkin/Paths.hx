@@ -22,6 +22,165 @@ class Paths implements ConsoleClass
     currentLevel = id;
   }
 
+  /**
+   * Mapa de compatibilidade pra call sites antigos que ainda passam só o
+   * nome curto do arquivo (ex: 'cancelMenu') em vez do caminho completo
+   * novo (ex: 'ui/main-menu/cancel-menu'). Preenche aqui conforme os erros
+   * de asset forem aparecendo — não é fallback automático/adivinhado,
+   * é uma lista confirmada manualmente. Tem prioridade sobre o resolver
+   * automático abaixo (LEGACY_KEY_MAP é checado primeiro).
+   */
+  static final LEGACY_KEY_MAP:Map<String, String> = [
+  // menu / UI geral
+  "cancelMenu" => "ui/main-menu/cancel-menu",
+  "confirmMenu" => "ui/main-menu/confirm-menu",
+  "scrollMenu" => "ui/main-menu/scroll-menu",
+  "menuDesat" => "ui/main-menu/menu-desat",
+  "menuBG" => "ui/main-menu/menu-bg",
+  "menuBGMagenta" => "ui/main-menu/menu-desat",
+  "screenshot" => "ui/main-menu/screenshot",
+  "freakyMenu" => "ui/main-menu/freaky-menu",
+  "freakyMenu/freakyMenu" => "ui/main-menu/freaky-menu/freaky-menu",
+
+  // input-offsets
+  "offsetsLoop/offsetsLoop" => "ui/input-offsets/offsets-loop/offsets-loop",
+  "offsetsLoop/drumsLoop" => "ui/input-offsets/drums-loop/drums-loop",
+
+  // pause
+  "breakfast/breakfast" => "ui/pause/music/breakfast/breakfast",
+  "breakfast-pico/breakfast-pico" => "ui/pause/music/breakfast-pico/breakfast-pico",
+  "breakfast-pixel/breakfast-pixel" => "ui/pause/music/breakfast-pixel/breakfast-pixel",
+
+  // character select
+  "CS_select" => "ui/character-select/sounds/select",
+  "CS_unlock" => "ui/character-select/sounds/unlock",
+  "CS_locked" => "ui/character-select/sounds/locked",
+  "CS_confirm" => "ui/character-select/sounds/confirm",
+  "CS_Lights" => "ui/character-select/sounds/lights",
+  "static loop" => "ui/character-select/sounds/static",
+
+  // chart editor
+  "chartEditorLoop/chartEditorLoop" => "ui/editors/chart-editor/artistic-expression",
+  "chartingSounds/ClickDown" => "ui/editors/chart-editor/charting-sounds/click-down",
+  "chartingSounds/ClickUp" => "ui/editors/chart-editor/charting-sounds/click-up",
+  "chartingSounds/noteLay" => "ui/editors/chart-editor/charting-sounds/note-place",
+  "chartingSounds/noteErase" => "ui/editors/chart-editor/charting-sounds/note-erase",
+  "chartingSounds/undo" => "ui/editors/chart-editor/charting-sounds/undo",
+  "chartingSounds/stretch1_UI" => "ui/editors/chart-editor/charting-sounds/stretch-1",
+  "chartingSounds/stretch2_UI" => "ui/editors/chart-editor/charting-sounds/stretch-2",
+  "chartingSounds/stretchSNAP_UI" => "ui/editors/chart-editor/charting-sounds/stretch-snap",
+  "chartingSounds/hitNotePlayer" => "ui/editors/chart-editor/charting-sounds/hitsound-player",
+  "chartingSounds/hitNoteOpponent" => "ui/editors/chart-editor/charting-sounds/hitsound-opponent",
+  "chartingSounds/openWindow" => "ui/editors/chart-editor/charting-sounds/window-open",
+  "chartingSounds/exitWindow" => "ui/editors/chart-editor/charting-sounds/window-exit",
+  "chartingSounds/metronome1" => "ui/editors/chart-editor/charting-sounds/metronome-1",
+  "chartingSounds/metronome2" => "ui/editors/chart-editor/charting-sounds/metronome-2",
+
+  // freeplay
+  "ranks/rankinbad" => "ui/freeplay/ranks/in/bad",
+  "ranks/rankinnormal" => "ui/freeplay/ranks/in/normal",
+  "ranks/rankinperfect" => "ui/freeplay/ranks/in/perfect",
+  "ranks/loss" => "ui/freeplay/ranks/slam/loss",
+  "ranks/good" => "ui/freeplay/ranks/slam/good",
+  "ranks/great" => "ui/freeplay/ranks/slam/great",
+  "ranks/excellent" => "ui/freeplay/ranks/slam/excellent",
+  "ranks/perfect" => "ui/freeplay/ranks/slam/perfect",
+  "fav" => "ui/freeplay/sounds/favorite",
+  "unfav" => "ui/freeplay/sounds/unfavorite",
+
+  // title
+  "introText" => "ui/title/intro-text",
+  "girlfriendsRingtone/girlfriendsRingtone" => "ui/title/girlfriends-ringtone/girlfriends-ringtone",
+
+  // newgrounds
+  "NGFadeIn" => "ui/medals/ng-fade-in",
+  "NGFadeOut" => "ui/medals/ng-fade-out",
+
+  // gameplay geral (miss notes)
+  "missnote1" => "gameplay/general/sounds/miss-note-1",
+  "missnote2" => "gameplay/general/sounds/miss-note-2",
+  "missnote3" => "gameplay/general/sounds/miss-note-3"
+  ];
+
+  /**
+   * Resolvedor automático de fallback: quando um call site antigo passa só
+   * o nome curto de um arquivo (ex: 'menuDesat', 'healthBar', 'logoBumpin')
+   * e esse nome não está no LEGACY_KEY_MAP, esse resolver escaneia
+   * assets/preload/ (uma única vez, na primeira falha) e monta um índice
+   * de "nome do arquivo" -> "caminho relativo completo, sem extensão".
+   * Assim, qualquer key antigo é encontrado onde quer que tenha ido parar
+   * na reestruturação, sem precisar mapear cada um manualmente.
+   *
+   * Isso NÃO cobre keys que dependem de estrutura de pasta (ex: algo com
+   * "/" no meio tipo 'freakyMenu/freakyMenu') — esses continuam precisando
+   * de uma entrada manual no LEGACY_KEY_MAP.
+   */
+  #if sys
+  static var _assetIndex:Null<Map<String, String>> = null;
+
+  static function buildAssetIndex():Void
+  {
+    _assetIndex = new Map<String, String>();
+    var root:String = 'assets/preload';
+    if (!sys.FileSystem.exists(root)) return;
+    indexDir(root, root);
+  }
+
+  static function indexDir(dir:String, root:String):Void
+  {
+    for (entry in sys.FileSystem.readDirectory(dir))
+    {
+      var fullPath:String = '$dir/$entry';
+      if (sys.FileSystem.isDirectory(fullPath))
+      {
+        indexDir(fullPath, root);
+      }
+      else
+      {
+        var nameNoExt:String = Path.withoutExtension(entry);
+        var relNoExt:String = Path.withoutExtension(fullPath.substr(root.length + 1));
+
+        var key:String = nameNoExt.toLowerCase();
+        // Não sobrescreve se já indexado (primeiro achado ganha, evita
+        // ambiguidade silenciosa entre arquivos de mesmo nome em pastas
+        // diferentes).
+        if (!_assetIndex.exists(key)) _assetIndex.set(key, relNoExt);
+      }
+    }
+  }
+
+  /**
+   * Tenta resolver um key antigo/curto pelo nome do arquivo, buscando em
+   * toda a árvore de assets. Retorna null se não achar nada.
+   */
+  public static function resolveByBasename(key:String):Null<String>
+  {
+    if (_assetIndex == null) buildAssetIndex();
+
+    var lastSlash:Int = key.lastIndexOf('/');
+    var baseName:String = lastSlash == -1 ? key : key.substr(lastSlash + 1);
+
+    return _assetIndex.get(baseName.toLowerCase());
+  }
+  #end
+
+  static inline function resolveKey(key:String):String
+  {
+    var mapped:Null<String> = LEGACY_KEY_MAP.get(key);
+    if (mapped != null) return mapped;
+
+    #if sys
+    // Só tenta o fallback automático se o path direto não existir.
+    if (!sys.FileSystem.exists('assets/$key.png') && !sys.FileSystem.exists('assets/$key'))
+    {
+      var found:Null<String> = resolveByBasename(key);
+      if (found != null) return found;
+    }
+    #end
+
+    return key;
+  }
+
   static inline function getPreloadPath(file:String):String
   {
     return 'assets/$file';
@@ -53,47 +212,47 @@ class Paths implements ConsoleClass
 
   public static function file(file:String, type:AssetType = TEXT):String
   {
-    return getPreloadPath(file);
+    return getPreloadPath(resolveKey(file));
   }
 
   public static function animateAtlas(path:String, ?library:String):String
   {
-    return getPreloadPath('$path');
+    return getPreloadPath(resolveKey(path));
   }
 
   public static function txt(key:String):String
   {
-    return getPreloadPath('$key.txt');
+    return getPreloadPath('${resolveKey(key)}.txt');
   }
 
   public static function frag(key:String):String
   {
-    return getPreloadPath('$key.frag');
+    return getPreloadPath('${resolveKey(key)}.frag');
   }
 
   public static function vert(key:String):String
   {
-    return getPreloadPath('$key.vert');
+    return getPreloadPath('${resolveKey(key)}.vert');
   }
 
   public static function xml(key:String):String
   {
-    return getPreloadPath('$key.xml');
+    return getPreloadPath('${resolveKey(key)}.xml');
   }
 
   public static function json(key:String):String
   {
-    return getPreloadPath('$key.json');
+    return getPreloadPath('${resolveKey(key)}.json');
   }
 
   public static function srt(key:String, ?library:String, ?directory:String = ''):String
   {
-    return getPreloadPath('$directory$key.srt');
+    return getPreloadPath('$directory${resolveKey(key)}.srt');
   }
 
   public static function sound(key:String, ?library:String):String
   {
-    return getPreloadPath('$key.${Constants.EXT_SOUND}');
+    return getPreloadPath('${resolveKey(key)}.${Constants.EXT_SOUND}');
   }
 
   public static function soundRandom(key:String, min:Int, max:Int):String
@@ -103,19 +262,20 @@ class Paths implements ConsoleClass
 
   public static function music(key:String):String
   {
-    return getPreloadPath('$key.${Constants.EXT_SOUND}');
+    return getPreloadPath('${resolveKey(key)}.${Constants.EXT_SOUND}');
   }
 
   public static function videos(key:String):String
   {
-    final path:Path = new Path(key);
+    final resolved:String = resolveKey(key);
+    final path:Path = new Path(resolved);
 
     if (path.ext != null)
     {
-      return getPreloadPath(key);
+      return getPreloadPath(resolved);
     }
 
-    return getPreloadPath('$key.${Constants.EXT_VIDEO}');
+    return getPreloadPath('$resolved.${Constants.EXT_VIDEO}');
   }
 
   public static function voices(song:String, ?suffix:String = ''):String
@@ -133,7 +293,7 @@ class Paths implements ConsoleClass
 
   public static function image(key:String, ?library:String):String
   {
-    return getPreloadPath('$key.png');
+    return getPreloadPath('${resolveKey(key)}.png');
   }
 
   public static function font(key:String):String
@@ -148,12 +308,12 @@ class Paths implements ConsoleClass
 
   public static function getSparrowAtlas(key:String, ?library:String):FlxAtlasFrames
   {
-    return FlxAtlasFrames.fromSparrow(image(key), file('$key.xml'));
+    return FlxAtlasFrames.fromSparrow(image(key), file('${resolveKey(key)}.xml'));
   }
 
   public static function getAnimateAtlas(key:String, ?library:String, settings:AtlasSpriteSettings):FlxAnimateFrames
   {
-    var graphicKey:String = getPreloadPath(key);
+    var graphicKey:String = getPreloadPath(resolveKey(key));
 
     var validatedSettings:AtlasSpriteSettings = {
       swfMode: settings?.swfMode ?? false,
@@ -184,7 +344,7 @@ class Paths implements ConsoleClass
 
   public static function getPackerAtlas(key:String):FlxAtlasFrames
   {
-    return FlxAtlasFrames.fromSpriteSheetPacker(image(key), file('$key.txt'));
+    return FlxAtlasFrames.fromSpriteSheetPacker(image(key), file('${resolveKey(key)}.txt'));
   }
 }
 
