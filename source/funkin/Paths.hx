@@ -90,6 +90,8 @@ class Paths implements ConsoleClass
 
   // title
   "introText" => "ui/title/intro-text",
+  "title-screen-text" => "ui/title/title-screen-text",
+  "title-screen-text-mobile" => "ui/title/title-screen-text-mobile",
   "girlfriendsRingtone/girlfriendsRingtone" => "ui/title/girlfriends-ringtone/girlfriends-ringtone",
 
   // newgrounds
@@ -126,45 +128,47 @@ class Paths implements ConsoleClass
     indexDir(root, root);
   }
 
-  static function indexDir(dir:String, root:String):Void
-  {
-    for (entry in sys.FileSystem.readDirectory(dir))
-    {
-      var fullPath:String = '$dir/$entry';
-      if (sys.FileSystem.isDirectory(fullPath))
-      {
-        indexDir(fullPath, root);
-      }
-      else
-      {
-        var nameNoExt:String = Path.withoutExtension(entry);
-        var relNoExt:String = Path.withoutExtension(fullPath.substr(root.length + 1));
+static function indexDir(dir:String, root:String):Void
+{
+  if (_assetIndex == null) return;
+  var index:Map<String, String> = _assetIndex;
 
-        var key:String = nameNoExt.toLowerCase();
-        // Não sobrescreve se já indexado (primeiro achado ganha, evita
-        // ambiguidade silenciosa entre arquivos de mesmo nome em pastas
-        // diferentes).
-        if (!_assetIndex.exists(key)) _assetIndex.set(key, relNoExt);
-      }
+  for (entry in sys.FileSystem.readDirectory(dir))
+  {
+    var fullPath:String = '$dir/$entry';
+    if (sys.FileSystem.isDirectory(fullPath))
+    {
+      indexDir(fullPath, root);
+    }
+    else
+    {
+      var nameNoExt:String = Path.withoutExtension(entry);
+      var relNoExt:String = Path.withoutExtension(fullPath.substr(root.length + 1));
+
+      var key:String = nameNoExt.toLowerCase();
+      if (!index.exists(key)) index.set(key, relNoExt);
     }
   }
+}
 
   /**
    * Tenta resolver um key antigo/curto pelo nome do arquivo, buscando em
    * toda a árvore de assets. Retorna null se não achar nada.
    */
   public static function resolveByBasename(key:String):Null<String>
-  {
-    if (_assetIndex == null) buildAssetIndex();
+{
+  if (_assetIndex == null) buildAssetIndex();
+  if (_assetIndex == null) return null;
+  var index:Map<String, String> = _assetIndex;
 
-    var lastSlash:Int = key.lastIndexOf('/');
-    var baseName:String = lastSlash == -1 ? key : key.substr(lastSlash + 1);
+  var lastSlash:Int = key.lastIndexOf('/');
+  var baseName:String = lastSlash == -1 ? key : key.substr(lastSlash + 1);
 
-    return _assetIndex.get(baseName.toLowerCase());
-  }
+  return index.get(baseName.toLowerCase());
+}
   #end
 
-  static inline function resolveKey(key:String):String
+  static function resolveKey(key:String):String
   {
     var mapped:Null<String> = LEGACY_KEY_MAP.get(key);
     if (mapped != null) return mapped;
