@@ -3,6 +3,7 @@ package funkin.data.freeplay.player;
 import funkin.ui.freeplay.charselect.PlayableCharacter;
 import funkin.save.Save;
 import funkin.util.tools.ISingleton;
+import funkin.util.assets.DataAssets;
 import funkin.data.DefaultRegistryImpl;
 
 @:nullSafety
@@ -27,9 +28,64 @@ class PlayerRegistry extends BaseRegistry<PlayableCharacter, PlayerData, PlayerE
     super('PLAYER', 'gameplay/playable-characters', PLAYER_DATA_VERSION_RULE);
   }
 
+  /**
+   * Override: os JSONs de playable character ficam dentro de uma subpasta
+   * com o mesmo nome do ID (ex: gameplay/playable-characters/bf/bf.json).
+   * listDataFilesInPath retorna o path completo incluindo a subpasta
+   * (ex: "bf/bf"), então extraímos só o primeiro segmento como ID real,
+   * igual o SongRegistry já faz.
+   */
   override public function loadEntries():Void
   {
-    super.loadEntries();
+    trace('DEBUG listDataFilesInPath result: ' + DataAssets.listDataFilesInPath('${dataFilePath}/'));
+    clearEntries();
+
+    var scriptedEntryClassNames:Array<String> = getScriptedClassNames();
+    log(' INFO '.info() + 'Parsing ${scriptedEntryClassNames.length} scripted entries...');
+
+    for (entryCls in scriptedEntryClassNames)
+    {
+      var entry = createScriptedEntry(entryCls);
+      if (entry != null)
+      {
+        entries.set(entry.id, entry);
+        scriptedEntryIds.set(entry.id, entryCls);
+        log('Successfully created scripted entry (${entryCls} = ${entry.id})');
+      }
+      else
+      {
+        log('Failed to create scripted entry (${entryCls})');
+      }
+    }
+
+    var entryIdList:Array<String> = DataAssets.listDataFilesInPath('${dataFilePath}/').map(function(path:String):String
+    {
+      return path.split('/')[0];
+    });
+    var unscriptedEntryIds:Array<String> = entryIdList.filter(function(id:String):Bool
+    {
+      return !entries.exists(id);
+    });
+    log(' INFO '.info() + 'Parsing ${unscriptedEntryIds.length} unscripted entries...');
+
+    for (entryId in unscriptedEntryIds)
+    {
+      try
+      {
+        var entry = createEntry(entryId);
+        if (entry != null)
+        {
+          log('Loaded entry data: ${entry}');
+          entries.set(entry.id, entry);
+        }
+      }
+      catch (e)
+      {
+        log(' WARNING '.warning() + ' Failed to load entry data: ${entryId}');
+        trace(e);
+        continue;
+      }
+    }
 
     for (playerId in listEntryIds())
     {
@@ -44,6 +100,21 @@ class PlayerRegistry extends BaseRegistry<PlayableCharacter, PlayerData, PlayerE
     }
 
     log('Loaded ${countEntries()} playable characters with ${ownedCharacterIds.size()} associations.');
+    trace('Loaded players: ' + PlayerRegistry.instance.listEntryIds());
+  }
+
+  /**
+   * Override: o JSON de cada player fica em <dataFilePath>/<id>/<id>.json,
+   * não em <dataFilePath>/<id>.json como o BaseRegistry assume por padrão.
+   */
+  override function loadEntryFile(id:String):JsonFile
+  {
+    var entryFilePath:String = Paths.json('$dataFilePath/$id/$id');
+    var rawJson:String = openfl.Assets.getText(entryFilePath).trim();
+    return {
+      fileName: entryFilePath,
+      contents: rawJson
+    };
   }
 
   public function countUnlockedCharacters():Int

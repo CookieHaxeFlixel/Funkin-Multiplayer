@@ -5,7 +5,7 @@ class DataAssets
 {
   static function buildDataPath(path:String):String
   {
-    return 'assets/data/${path}';
+    return 'assets/${path}';
   }
 
   public static function listDataFilesInPath(path:String, suffix:String = '.json'):Array<String>
